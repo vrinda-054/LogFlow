@@ -1,0 +1,193 @@
+version: "3.9"
+
+# =============================================================================
+# LogFlow — Docker Compose
+#
+# Brings up the full infrastructure with one command:
+#   docker compose up -d
+#
+# Services
+# --------
+#   kafka         — Apache Kafka 3.x in KRaft mode (no Zookeeper)
+#   kafka-init    — One-shot init container that creates the required topics
+#   postgres      — PostgreSQL 15 for processed log storage
+#   producer      — Placeholder (Person 1 — ingestion/)
+#   consumer      — Placeholder (Person 2 — consumers/)
+#   processing    — Placeholder (Person 3 — processing/)
+#   dashboard     — Placeholder (Person 4 — dashboard/)
+#
+# Internal DNS names used by application code:
+#   Kafka broker  → kafka:9092
+#   PostgreSQL    → postgres:5432
+# =============================================================================
+
+x-common-env: &common-env
+  KAFKA_BROKER: kafka:9092
+  KAFKA_TOPIC_LOGS: logs
+  KAFKA_TOPIC_DLQ: logs-dlq
+  KAFKA_CONSUMER_GROUP: logflow-group
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: logflow
+  POSTGRES_USER: logflow_user
+  POSTGRES_PASSWORD: changeme
+  DATABASE_URL: postgresql://logflow_user:changeme@postgres:5432/logflow
+  FASTAPI_PORT: "8000"
+  VITE_API_BASE_URL: http://localhost:8000
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Apache Kafka 3.x — KRaft mode (no Zookeeper)
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: logflow-kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"   # External (host) access
+      - "9093:9093"   # KRaft controller port
+    environment:
+      # KRaft — combined broker+controller role
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # topics created explicitly by kafka-init
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"    # stable cluster UUID for KRaft
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Kafka Topic Init — runs once, then exits
+  # Creates: logs (4 partitions) + logs-dlq (1 partition)
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: logflow-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo '--- Creating Kafka topics ---'
+
+      kafka-topics --bootstrap-server kafka:9092 \
+        --create --if-not-exists \
+        --topic logs \
+        --partitions 4 \
+        --replication-factor 1 \
+        --config retention.ms=86400000 \
+        --config cleanup.policy=delete
+      echo 'Topic [logs] created with 4 partitions.'
+
+      kafka-topics --bootstrap-server kafka:9092 \
+        --create --if-not-exists \
+        --topic logs-dlq \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config retention.ms=604800000 \
+        --config cleanup.policy=delete
+      echo 'Topic [logs-dlq] created with 1 partition.'
+
+      kafka-topics --bootstrap-server kafka:9092 --list
+      echo '--- Topic init complete ---'
+      "
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 15
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: logflow-postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: logflow
+      POSTGRES_USER: logflow_user
+      POSTGRES_PASSWORD: changeme
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./processing/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logflow_user -d logflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Placeholder service — Person 1 (ingestion/)
+  # Replace image with your actual build once ingestion/ is implemented.
+  # ---------------------------------------------------------------------------
+  producer:
+    image: busybox
+    container_name: logflow-producer
+    command: ["sh", "-c", "echo '[placeholder] producer not yet implemented' && sleep infinity"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+
+  # ---------------------------------------------------------------------------
+  # Placeholder service — Person 2 (consumers/)
+  # ---------------------------------------------------------------------------
+  consumer:
+    image: busybox
+    container_name: logflow-consumer
+    command: ["sh", "-c", "echo '[placeholder] consumer not yet implemented' && sleep infinity"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+
+  # ---------------------------------------------------------------------------
+  # Placeholder service — Person 3 (processing/)
+  # ---------------------------------------------------------------------------
+  processing:
+    image: busybox
+    container_name: logflow-processing
+    command: ["sh", "-c", "echo '[placeholder] processing/api not yet implemented' && sleep infinity"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+
+  # ---------------------------------------------------------------------------
+  # Placeholder service — Person 4 (dashboard/)
+  # ---------------------------------------------------------------------------
+  dashboard:
+    image: busybox
+    container_name: logflow-dashboard
+    command: ["sh", "-c", "echo '[placeholder] dashboard not yet implemented' && sleep infinity"]
+    ports:
+      - "5173:5173"
+    environment:
+      <<: *common-env
+
+volumes:
+  kafka-data:
+  postgres-data:

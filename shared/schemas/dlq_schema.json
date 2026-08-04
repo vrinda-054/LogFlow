@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logflow/schemas/dlq_envelope/v1",
+  "title": "DLQEnvelope",
+  "description": "Dead Letter Queue envelope schema. When a consumer (consumers/dlq_handler.py) cannot process a message — due to schema violations, parse errors, or repeated processing failures — it wraps the raw message in this envelope and publishes it to the 'logs-dlq' Kafka topic. Person 3's FastAPI (/dlq/messages) reads from this topic/table and exposes it to the React dashboard (Person 4).",
+  "type": "object",
+  "required": ["original_message", "failure_reason", "retry_count", "failed_at"],
+  "additionalProperties": false,
+  "properties": {
+    "original_message": {
+      "type": ["object", "string"],
+      "description": "The original payload that failed processing. If the payload was valid JSON it is embedded as an object; if it was malformed/unparseable it is stored as a raw string. Consumers MUST NOT modify this field."
+    },
+    "failure_reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Human-readable description of why the message failed. Examples: 'JSON schema validation failed: trace_id missing', 'Deserialization error: invalid UTF-8', 'Processing timeout after 3 retries'."
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "Number of times dlq_handler.py attempted to reprocess this message before routing it to the DLQ. A value of 0 means it was never retried (immediate DLQ). The retry ceiling is configurable in dlq_handler.py."
+    },
+    "failed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of the final failure event — i.e., when the message was placed into the DLQ after exhausting retries."
+    }
+  },
+  "examples": [
+    {
+      "original_message": "{\"timestamp\": \"2025-01-15T12:34:56Z\", \"service\": \"auth-service\", \"severity\": \"ERROR\", \"message\": \"Login failed\"}",
+      "failure_reason": "JSON schema validation failed: required field 'trace_id' is missing",
+      "retry_count": 0,
+      "failed_at": "2025-01-15T12:35:01.123Z"
+    }
+  ]
+}
