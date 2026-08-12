@@ -5,17 +5,17 @@ ingestion/log_templates.py — Person 1 (Ingestion Layer)
 Role
 ----
 Provides parameterised log message generators for each known service.
-Called exclusively by producer.py to generate realistic synthetic log data.
+Called by log_generator.py and producer.py to generate realistic synthetic log data.
 
 This module is internal to the ingestion/ layer and has no direct Kafka
-dependency. It must be imported by producer.py — not by consumers.
+dependency. It must be imported by log_generator.py / producer.py — not by consumers.
 
 Input
 -----
   generate_log(service: str, severity: str | None = None) is called with:
     - service : one of the names in SERVICES
     - severity: optional override; if None, severity is chosen probabilistically
-                (INFO 60%, WARNING 20%, ERROR 15%, CRITICAL 5%)
+                (DEBUG 5%, INFO 60%, WARNING 20%, ERROR 12%, CRITICAL 3%)
 
 Output (Return Value)
 ---------------------
@@ -27,19 +27,13 @@ Output (Return Value)
       "message"   : "<realistic log line>",
       "trace_id"  : "<32-char lowercase hex>"
     }
-  The caller (producer.py) is responsible for JSON-serialising this dict.
 
-Generators (to be implemented per service)
--------------------------------------------
+Generators (per service)
+------------------------
   _auth_log()     → login attempts, token issues, 2FA events, session timeouts
   _payment_log()  → transaction start/end, payment failures, refund events
   _api_log()      → HTTP request/response lines (method, path, status, latency)
   _db_log()       → query events, slow query warnings, connection pool metrics
-
-Interface Contract
-------------------
-  Consumed by: ingestion/producer.py only
-  No Kafka, DB, or network I/O in this module.
 """
 
 import uuid
@@ -69,59 +63,85 @@ def _pick_severity(override: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-service log generators — stubs to be replaced with realistic templates
+# Per-service realistic log generators
 # ---------------------------------------------------------------------------
 
 def _auth_log(severity: str) -> str:
-    """
-    Generate an auth-service log message.
-
-    TODO: implement varied messages for:
-      - Successful / failed login (include user_id, IP)
-      - Token refresh / expiry
-      - 2FA challenge events
-      - Session revocation
-    """
-    return f"[auth-service] STUB severity={severity} — implement me"
+    user_id = random.randint(1000, 9999)
+    ip_addr = f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,255)}"
+    
+    if severity == "DEBUG":
+        return f"User session evaluation started for user_id={user_id} ip={ip_addr}"
+    elif severity == "INFO":
+        action = random.choice(["User login successful", "Token refreshed", "2FA challenge verified", "Session created"])
+        return f"{action} for user_id={user_id} ip={ip_addr}"
+    elif severity == "WARNING":
+        reason = random.choice(["Invalid password attempt (1/3)", "Token near expiration", "Unusual login location detected"])
+        return f"{reason} for user_id={user_id} ip={ip_addr}"
+    elif severity == "ERROR":
+        reason = random.choice(["Login failed: invalid credentials", "2FA validation failure", "Session expired due to inactivity"])
+        return f"{reason} for user_id={user_id} ip={ip_addr}"
+    else:  # CRITICAL
+        return f"Account locked after multiple failed login attempts user_id={user_id} ip={ip_addr}"
 
 
 def _payment_log(severity: str) -> str:
-    """
-    Generate a payment-service log message.
+    txn_id = f"txn_{uuid.uuid4().hex[:12]}"
+    amount = round(random.uniform(5.0, 1500.0), 2)
+    currency = random.choice(["USD", "EUR", "GBP", "CAD"])
 
-    TODO: implement varied messages for:
-      - Transaction initiated / completed (include txn_id, amount, currency)
-      - Payment gateway timeout
-      - Refund processed / failed
-      - Fraud flag raised
-    """
-    return f"[payment-service] STUB severity={severity} — implement me"
+    if severity == "DEBUG":
+        return f"Payment payload validation passed txn_id={txn_id}"
+    elif severity == "INFO":
+        status = random.choice(["Transaction initiated", "Payment processed successfully", "Refund requested", "Settlement completed"])
+        return f"{status} txn_id={txn_id} amount={amount} {currency}"
+    elif severity == "WARNING":
+        msg = random.choice(["Card expiry date warning", "High amount transaction flagged for manual review"])
+        return f"{msg} txn_id={txn_id} amount={amount} {currency}"
+    elif severity == "ERROR":
+        reason = random.choice(["Payment declined by gateway: insufficient_funds", "Gateway connection timeout", "Invalid card CVV"])
+        return f"{reason} txn_id={txn_id} amount={amount} {currency}"
+    else:  # CRITICAL
+        return f"Payment gateway outage detected during txn_id={txn_id} amount={amount} {currency}"
 
 
 def _api_log(severity: str) -> str:
-    """
-    Generate an api-gateway log message.
-
-    TODO: implement varied messages for:
-      - HTTP request line: method, path, status code, latency_ms
-      - Rate limit exceeded
-      - Upstream service error (5xx)
-      - Request validation failure (4xx)
-    """
-    return f"[api-gateway] STUB severity={severity} — implement me"
+    method = random.choice(["GET", "POST", "PUT", "DELETE"])
+    endpoint = random.choice(["/v1/users", "/v1/orders", "/v1/auth/login", "/v1/products", "/v1/checkout"])
+    latency_ms = random.randint(5, 450)
+    
+    if severity == "DEBUG":
+        return f"Routing HTTP request {method} {endpoint} header_count={random.randint(5,15)}"
+    elif severity == "INFO":
+        status = random.choice([200, 201, 204])
+        return f"HTTP {method} {endpoint} status={status} latency={latency_ms}ms"
+    elif severity == "WARNING":
+        status = random.choice([400, 401, 403, 404, 429])
+        latency_ms = random.randint(200, 1200)
+        return f"HTTP {method} {endpoint} status={status} latency={latency_ms}ms"
+    elif severity == "ERROR":
+        status = random.choice([500, 502, 503, 504])
+        latency_ms = random.randint(1500, 5000)
+        return f"HTTP {method} {endpoint} status={status} latency={latency_ms}ms error='Upstream service failure'"
+    else:  # CRITICAL
+        return f"API Gateway threshold reached: circuit breaker tripped on endpoint {endpoint}"
 
 
 def _db_log(severity: str) -> str:
-    """
-    Generate a db-proxy log message.
+    query_hash = f"q_{uuid.uuid4().hex[:8]}"
+    duration_ms = random.randint(1, 45)
 
-    TODO: implement varied messages for:
-      - Query executed (include query_hash, duration_ms)
-      - Slow query warning (duration > threshold)
-      - Connection pool exhausted
-      - Deadlock detected / resolved
-    """
-    return f"[db-proxy] STUB severity={severity} — implement me"
+    if severity == "DEBUG":
+        return f"Executing query_hash={query_hash} params_count={random.randint(1,5)}"
+    elif severity == "INFO":
+        return f"Query executed query_hash={query_hash} rows_affected={random.randint(1,100)} duration={duration_ms}ms"
+    elif severity == "WARNING":
+        slow_duration = random.randint(250, 1500)
+        return f"Slow query detected query_hash={query_hash} duration={slow_duration}ms threshold=200ms"
+    elif severity == "ERROR":
+        return f"Database query failed query_hash={query_hash} error='deadlock detected' duration={duration_ms}ms"
+    else:  # CRITICAL
+        return f"Connection pool exhausted max_connections=100 active_connections=100 query_hash={query_hash}"
 
 
 _GENERATORS = {
@@ -161,7 +181,7 @@ def generate_log(service: str, severity: str | None = None) -> dict:
     message = _GENERATORS[service](sev)
 
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "service":   service,
         "severity":  sev,
         "message":   message,
