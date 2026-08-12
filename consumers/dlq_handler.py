@@ -2,118 +2,199 @@
 consumers/dlq_handler.py — Person 2 (Consumer Layer)
 ======================================================
 
-Role
-----
 Handles failed messages within the consumer layer. When consumer.py cannot
 successfully process a Kafka message (schema violation, parse error, or repeated
-transient failures), it delegates here to either retry the message or publish
-it to the Dead Letter Queue (DLQ).
+transient failures), it delegates here to either retry or publish to the DLQ.
 
-Upstream / Downstream Contracts
---------------------------------
-  CALLED BY ← consumers/consumer.py:
-    - retry_with_backoff(fn, message_bytes, max_retries) — retry a failed handler
-    - publish_to_dlq(original_message, failure_reason, retry_count) — send to DLQ
-
-  OUTPUT → Kafka topic `logs-dlq` (env: KAFKA_TOPIC_DLQ):
-    Each DLQ message is a UTF-8 JSON string conforming to
-    shared/schemas/dlq_schema.json:
-      {
-        "original_message" : <original payload as object or raw string>,
-        "failure_reason"   : <str>,
-        "retry_count"      : <int>,
-        "failed_at"        : <ISO 8601 UTC timestamp>
-      }
-
-  OUTPUT → processing/db/schema.sql (table: dlq_log):
-    Person 3's aggregator also persists DLQ events for the FastAPI
-    /dlq/messages endpoint consumed by the React dashboard (Person 4).
-
-Retry Strategy
---------------
-  Exponential backoff: delay = base_delay * (2 ** attempt)
-  Default: base_delay=0.5s, max_retries=3
-  After max_retries exhausted → publish_to_dlq() is called automatically.
-
-Key Functions (to be implemented)
-----------------------------------
-  retry_with_backoff(fn, message_bytes, max_retries=3) → bool
-  publish_to_dlq(original_message, failure_reason, retry_count) → None
+OUTPUT → Kafka topic `logs-dlq` : UTF-8 JSON conforming to dlq_schema.json
 """
 
-import os
 import json
+import logging
+import os
 import time
 from datetime import datetime, timezone
 
+from confluent_kafka import Producer, KafkaException
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# TODO (Person 2): initialise a confluent_kafka.Producer for DLQ publishing
+# Config
 # ---------------------------------------------------------------------------
-# from confluent_kafka import Producer
-# _dlq_producer = None   # initialised lazily in _get_dlq_producer()
+_DLQ_TOPIC   = os.environ.get("KAFKA_TOPIC_DLQ", "logs-dlq")
+_KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "localhost:9092")
 
-_DLQ_TOPIC = os.environ.get("KAFKA_TOPIC_DLQ", "logs-dlq")
+# ---------------------------------------------------------------------------
+# Singleton DLQ producer
+# ---------------------------------------------------------------------------
+_dlq_producer: Producer | None = None
 
 
-def _get_dlq_producer():
+def _get_dlq_producer() -> Producer:
     """
-    Lazily initialise and return a shared confluent-kafka Producer for the DLQ.
+    Lazily initialise and return a module-level singleton confluent-kafka
+    Producer dedicated to publishing DLQ messages.
 
     Returns
     -------
     confluent_kafka.Producer
-        Configured to connect to KAFKA_BROKER.
+        Thread-safe; safe to call produce() from multiple threads.
 
-    Notes
-    -----
-    Uses a module-level singleton to avoid creating a new Producer per message.
-    Thread-safety: confluent-kafka Producer is thread-safe for produce() calls.
+    Raises
+    ------
+    KafkaException
+        If the broker is unreachable during the first call.
     """
-    # TODO: implement singleton Producer init
-    raise NotImplementedError("_get_dlq_producer: not yet implemented")
+    global _dlq_producer
+    if _dlq_producer is None:
+        broker = os.environ.get("KAFKA_BROKER", "localhost:9092")
+        _dlq_producer = Producer({
+            "bootstrap.servers": broker,
+            "acks":              "all",   # wait for leader + all ISR replicas
+            "retries":           5,
+            "retry.backoff.ms":  300,
+        })
+        logger.info("[dlq_handler] DLQ producer initialised → broker=%s", broker)
+    return _dlq_producer
 
 
-def retry_with_backoff(fn, message_bytes: bytes, max_retries: int = 3) -> bool:
+# ---------------------------------------------------------------------------
+# Delivery callback
+# ---------------------------------------------------------------------------
+def _delivery_report(err, msg) -> None:
     """
-    Attempt to call `fn(message_bytes)` up to `max_retries` times with
-    exponential backoff between attempts.
+    Callback invoked by confluent-kafka after each produce() attempt.
+    Logs success or failure of DLQ message delivery.
+    """
+    if err:
+        logger.error(
+            "[dlq_handler] DLQ delivery FAILED | topic=%s partition=%s error=%s",
+            msg.topic(), msg.partition(), err
+        )
+    else:
+        logger.debug(
+            "[dlq_handler] DLQ delivery OK | topic=%s partition=%s offset=%s",
+            msg.topic(), msg.partition(), msg.offset()
+        )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def publish_to_dlq(
+    original_message,
+    failure_reason: str,
+    retry_count: int,
+) -> None:
+    """
+    Wrap the failed message in a DLQ envelope and publish it to `logs-dlq`.
 
     Parameters
     ----------
-    fn           : callable
-        The processing function to retry. Signature: fn(bytes) → Any.
-        Expected to be consumer.process_message or a downstream handler.
-    message_bytes: bytes
-        The raw Kafka message payload to reprocess.
-    max_retries  : int
-        Maximum number of retry attempts before giving up (default: 3).
+    original_message : str | dict
+        The original payload. Pass as dict if valid JSON was parsed,
+        or as a raw string if the payload was unparseable.
+    failure_reason   : str
+        Human-readable explanation of the failure (truncated to 1024 chars).
+    retry_count      : int
+        Number of retries already attempted (0 = sent to DLQ immediately).
+
+    Behaviour
+    ---------
+    - Wraps payload in dlq_schema.json envelope.
+    - Publishes to `logs-dlq` Kafka topic (1 partition, no key needed).
+    - Calls producer.poll(0) to serve any pending delivery callbacks.
+    - Does NOT flush — flushing happens on consumer shutdown.
+
+    Raises
+    ------
+    KafkaException
+        If the local produce queue is full (BufferError) or broker errors.
+    """
+    envelope = {
+        "original_message": original_message,
+        "failure_reason":   failure_reason[:1024],
+        "retry_count":      retry_count,
+        "failed_at":        datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+    }
+
+    payload = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+    producer = _get_dlq_producer()
+
+    try:
+        producer.produce(
+            topic=_DLQ_TOPIC,
+            value=payload,
+            on_delivery=_delivery_report,
+        )
+        producer.poll(0)  # serve delivery callbacks without blocking
+    except BufferError:
+        # Local queue full → flush enough to make room, then retry once
+        logger.warning("[dlq_handler] Producer queue full — flushing before retry")
+        producer.flush(timeout=5)
+        producer.produce(
+            topic=_DLQ_TOPIC,
+            value=payload,
+            on_delivery=_delivery_report,
+        )
+
+    logger.warning(
+        "[dlq_handler] → DLQ | topic=%s reason='%s' retries=%d",
+        _DLQ_TOPIC, failure_reason[:120], retry_count
+    )
+
+
+def retry_with_backoff(
+    fn,
+    message_bytes: bytes,
+    max_retries: int = 3,
+    base_delay: float = 0.5,
+) -> bool:
+    """
+    Attempt fn(message_bytes) up to max_retries times with exponential backoff.
+    If all retries fail, publishes the message to the DLQ automatically.
+
+    Parameters
+    ----------
+    fn            : callable   fn(bytes) → Any
+    message_bytes : bytes      Raw Kafka message payload.
+    max_retries   : int        Maximum retry attempts (default: 3).
+    base_delay    : float      Initial backoff in seconds (doubles each attempt).
 
     Returns
     -------
     bool
-        True if fn succeeded within max_retries attempts, False otherwise.
-
-    Side Effects
-    ------------
-    If all retries fail, calls publish_to_dlq() with retry_count=max_retries
-    and failure_reason taken from the last exception.
+        True  — fn succeeded within the retry budget.
+        False — all retries exhausted; message was sent to DLQ.
     """
-    base_delay = 0.5  # seconds
-    last_exc   = None
+    last_exc: Exception | None = None
 
     for attempt in range(max_retries + 1):
         try:
             fn(message_bytes)
+            if attempt > 0:
+                logger.info(
+                    "[dlq_handler] Recovered on attempt %d/%d", attempt, max_retries
+                )
             return True
-        except Exception as exc:
+
+        except Exception as exc:          # noqa: BLE001
             last_exc = exc
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
-                print(f"[dlq_handler] Retry {attempt + 1}/{max_retries} "
-                      f"after {delay:.1f}s — {exc}")
+                logger.warning(
+                    "[dlq_handler] Attempt %d/%d failed — retrying in %.1fs | %s",
+                    attempt + 1, max_retries, delay, exc
+                )
                 time.sleep(delay)
 
-    # All retries exhausted
+    # All retries exhausted → DLQ
+    logger.error(
+        "[dlq_handler] All %d retries failed — routing to DLQ | %s",
+        max_retries, last_exc
+    )
     publish_to_dlq(
         original_message=message_bytes.decode("utf-8", errors="replace"),
         failure_reason=str(last_exc),
@@ -122,45 +203,21 @@ def retry_with_backoff(fn, message_bytes: bytes, max_retries: int = 3) -> bool:
     return False
 
 
-def publish_to_dlq(
-    original_message,
-    failure_reason: str,
-    retry_count: int,
-) -> None:
+def flush(timeout: float = 10.0) -> None:
     """
-    Wrap the failed message in a DLQ envelope and publish it to the `logs-dlq`
-    Kafka topic.
+    Block until all pending DLQ produce requests are delivered or timeout.
+    Call this on consumer shutdown to avoid losing in-flight DLQ messages.
 
     Parameters
     ----------
-    original_message : str | dict
-        The original message payload. Pass as a dict if it was valid JSON,
-        or as a raw string if it could not be parsed.
-    failure_reason   : str
-        Human-readable explanation of the failure (≤1024 chars).
-    retry_count      : int
-        Number of retries attempted before this DLQ publication (≥0).
-
-    Output
-    ------
-    Publishes a single message to Kafka topic `logs-dlq`.
-    The message key is None (DLQ topic has 1 partition; no ordering needed).
-    The message value is a UTF-8 JSON string conforming to dlq_schema.json.
-
-    Raises
-    ------
-    RuntimeError
-        If the Kafka produce call fails after the internal delivery callback
-        reports an error.
+    timeout : float   Max seconds to wait (default: 10).
     """
-    envelope = {
-        "original_message": original_message,
-        "failure_reason":   failure_reason[:1024],
-        "retry_count":      retry_count,
-        "failed_at":        datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-    }
-    print(f"[dlq_handler] Publishing to DLQ | reason='{failure_reason[:80]}...' "
-          f"retries={retry_count}")
-    # TODO: producer = _get_dlq_producer()
-    # TODO: producer.produce(_DLQ_TOPIC, value=json.dumps(envelope).encode("utf-8"))
-    # TODO: producer.poll(0)
+    if _dlq_producer is not None:
+        remaining = _dlq_producer.flush(timeout=timeout)
+        if remaining > 0:
+            logger.warning(
+                "[dlq_handler] flush() timed out — %d DLQ messages may be lost",
+                remaining
+            )
+        else:
+            logger.info("[dlq_handler] flush() complete — all DLQ messages delivered")

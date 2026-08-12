@@ -2,104 +2,89 @@
 consumers/rebalance_config.py — Person 2 (Consumer Layer)
 ===========================================================
 
-Role
-----
-Centralises Kafka consumer group rebalance settings. Provides a factory
-function that returns a fully-configured consumer config dict ready for
-confluent_kafka.Consumer(). All consumer instances in the group MUST use
-these settings to ensure consistent rebalance behaviour.
-
-Why Cooperative-Sticky Rebalance?
-----------------------------------
-The default eager rebalance protocol revokes ALL partitions from ALL
-consumers at the start of every rebalance, causing processing gaps.
-The cooperative-sticky protocol minimises disruption:
-  - Only the partitions that need to move are revoked.
-  - Consumers retain their other partitions and keep processing.
-  - Stickiness ensures consumers tend to re-acquire the same partitions
-    across rebalances, which helps locality (e.g. in-memory aggregator state).
-
-Upstream caller : consumers/consumer.py (imports get_consumer_config())
-No downstream contract — this is purely configuration.
-
-Input
------
-  Environment variables:
-    KAFKA_BROKER           : Kafka bootstrap server (required)
-    KAFKA_CONSUMER_GROUP   : Consumer group ID (default: logflow-group)
-    KAFKA_TOPIC_LOGS       : Topic to subscribe to (default: logs)
-
-Output
-------
-  Returns a dict suitable for confluent_kafka.Consumer(config).
+Centralises Kafka consumer group rebalance settings.
+All consumer instances MUST use get_consumer_config() so every instance
+in the group negotiates with the same protocol parameters.
 """
 
+import logging
 import os
 
+logger = logging.getLogger(__name__)
 
-def get_consumer_config(
-    extra_config: dict | None = None,
-) -> dict:
+
+def get_consumer_config(extra_config: dict | None = None) -> dict:
     """
     Build and return the confluent-kafka Consumer configuration dict.
 
     Parameters
     ----------
     extra_config : dict | None
-        Optional overrides to merge into the base configuration.
-        Useful for test fixtures or per-instance tuning.
+        Optional overrides merged on top of the base config.
+        Useful for test fixtures (e.g. inject a mock broker address).
 
     Returns
     -------
     dict
-        Full consumer configuration ready for confluent_kafka.Consumer().
+        Full consumer configuration for confluent_kafka.Consumer().
 
     Raises
     ------
     EnvironmentError
-        If KAFKA_BROKER is not set.
+        If KAFKA_BROKER is not set in the environment.
     """
     broker = os.environ.get("KAFKA_BROKER")
     if not broker:
-        raise EnvironmentError("KAFKA_BROKER not set. See .env.example.")
+        raise EnvironmentError(
+            "KAFKA_BROKER is not set. Copy .env.example → .env and set the value."
+        )
 
     config = {
-        # ---------------------------------------------------------------
+        # -------------------------------------------------------------------
         # Connection
-        # ---------------------------------------------------------------
+        # -------------------------------------------------------------------
         "bootstrap.servers": broker,
         "group.id":          os.environ.get("KAFKA_CONSUMER_GROUP", "logflow-group"),
 
-        # ---------------------------------------------------------------
-        # Offset behaviour
-        # ---------------------------------------------------------------
-        "auto.offset.reset":  "earliest",   # consume from beginning if no committed offset
-        "enable.auto.commit": False,         # manual commit for at-least-once guarantees
+        # -------------------------------------------------------------------
+        # Offset strategy — at-least-once delivery
+        # Manual commit lets us commit ONLY after successful processing or DLQ.
+        # -------------------------------------------------------------------
+        "auto.offset.reset":  "earliest",
+        "enable.auto.commit": False,
 
-        # ---------------------------------------------------------------
-        # Cooperative-sticky rebalance (REQ-related: minimise processing gaps)
-        # ---------------------------------------------------------------
+        # -------------------------------------------------------------------
+        # Cooperative-sticky rebalance
+        # Only the partitions that NEED to move are revoked during a rebalance.
+        # Other partitions keep running — this prevents processing gaps on
+        # pod restart or consumer group expansion.
+        # -------------------------------------------------------------------
         "partition.assignment.strategy": "cooperative-sticky",
 
-        # ---------------------------------------------------------------
-        # Session & heartbeat tuning
-        # ---------------------------------------------------------------
-        "session.timeout.ms":      30_000,  # 30s — declare consumer dead after this
-        "heartbeat.interval.ms":    9_000,  # 9s  — must be < session.timeout / 3
-        "max.poll.interval.ms":   300_000,  # 5min — max time between poll() calls
-                                             # (increase if processing is slow)
+        # -------------------------------------------------------------------
+        # Session & heartbeat
+        # heartbeat.interval.ms must be < session.timeout.ms / 3
+        # max.poll.interval.ms must be > the longest possible processing time
+        # -------------------------------------------------------------------
+        "session.timeout.ms":    30_000,   # 30s  — declare dead after this
+        "heartbeat.interval.ms":  9_000,   # 9s   — heartbeat frequency
+        "max.poll.interval.ms": 300_000,   # 5min — max between poll() calls
 
-        # ---------------------------------------------------------------
+        # -------------------------------------------------------------------
         # Fetch tuning
-        # ---------------------------------------------------------------
-        "fetch.min.bytes":           1,
-        "fetch.max.wait.ms":       500,
+        # -------------------------------------------------------------------
+        "fetch.min.bytes":            1,
+        "fetch.max.wait.ms":        500,
         "max.partition.fetch.bytes": 1_048_576,  # 1 MiB per partition per fetch
 
-        # ---------------------------------------------------------------
-        # Error handling
-        # ---------------------------------------------------------------
-        "error_cb": _on_error,
+        # -------------------------------------------------------------------
+        # Callbacks
+        # -------------------------------------------------------------------
+        "error_cb":  _on_error,
+        "stats_cb":  _on_stats,
+
+        # Emit broker/topic stats every 30 seconds for lag observability
+        "statistics.interval.ms": 30_000,
     }
 
     if extra_config:
@@ -110,17 +95,22 @@ def get_consumer_config(
 
 def _on_error(error) -> None:
     """
-    Global error callback for the consumer.
-    Logs Kafka client-level errors (not message-level errors).
-
-    Parameters
-    ----------
-    error : confluent_kafka.KafkaError
+    Called by librdkafka on client-level errors (NOT per-message errors).
+    These are typically connectivity or broker issues.
     """
-    print(f"[rebalance_config] Kafka client error: {error}")
-    # TODO: integrate with a monitoring/alerting system
+    logger.error("[rebalance_config] Kafka client error: code=%s msg=%s",
+                 error.code(), error.str())
+
+
+def _on_stats(stats_json: str) -> None:
+    """
+    Called every statistics.interval.ms with a JSON stats blob from librdkafka.
+    Useful for external monitoring integrations (Prometheus, Datadog, etc.).
+    Currently just debug-logs the raw JSON; replace with metric emission.
+    """
+    logger.debug("[rebalance_config] librdkafka stats: %s", stats_json[:200])
 
 
 def get_topic() -> str:
-    """Return the configured log topic name from environment."""
+    """Return the configured main log topic name."""
     return os.environ.get("KAFKA_TOPIC_LOGS", "logs")
