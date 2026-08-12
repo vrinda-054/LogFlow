@@ -8,133 +8,209 @@ Entry point for the LogFlow ingestion layer. Generates synthetic log messages
 and publishes them to the Kafka topic `logs` (4 partitions) using the
 confluent-kafka producer client.
 
-This module is the **upstream boundary** of the pipeline:
-  - It PRODUCES messages conforming to shared/schemas/log_schema.json
-  - The Kafka topic / broker config comes from environment variables (see .env.example)
-  - Downstream consumers (consumers/consumer.py) depend on the schema contract
-
 CLI Interface
 -------------
 Run via:  python producer.py [OPTIONS]
 
 Options
 -------
-  --rate INT          Messages per second to produce (default: 10)
+  --rate INT          Messages per second target (default: 10)
   --duration INT      Total run time in seconds; 0 = run forever (default: 0)
   --malformed-pct INT Percentage of messages [0–100] that should be intentionally
-                      malformed (missing fields / bad types) to exercise DLQ handling
-                      in consumers/dlq_handler.py (default: 0)
-  --scenario STR      Load profile preset. One of:
-                        normal    — steady rate, all valid messages
-                        spike     — normal rate with periodic 10× burst for 5 s
-                        malformed — 50% malformed messages regardless of --malformed-pct
-
-Input
------
-  - Environment variables: KAFKA_BROKER, KAFKA_TOPIC_LOGS (see .env.example)
-  - log_templates.py: provides generate_log(service) → dict
-
-Output
-------
-  - Kafka topic `logs` (env: KAFKA_TOPIC_LOGS): JSON-serialised LogMessage objects
-    conforming to shared/schemas/log_schema.json
-  - stdout: per-message confirmation (rate-limited) + summary stats on exit
-
-Dependencies
-------------
-  See requirements.txt
-  Key: confluent-kafka, faker (used inside log_templates.py)
-
-Interface Contract
-------------------
-  OUTPUT → consumers/consumer.py:
-    Every message on the `logs` topic must be a UTF-8 encoded JSON string
-    matching shared/schemas/log_schema.json exactly.
-    Partition key = service name (ensures same-service messages stay ordered).
+                      malformed (default: 0)
+  --scenario STR      Load profile preset (normal, spike, malformed) (default: normal)
 """
 
 import argparse
-import os
 import json
+import os
+import sys
 import time
+from typing import Any, Dict
 
-# ---------------------------------------------------------------------------
-# TODO (Person 1): implement the following when building the ingestion layer
-# ---------------------------------------------------------------------------
-# from confluent_kafka import Producer
-# from log_templates import generate_log, SERVICES
+try:
+    from confluent_kafka import Producer, KafkaError, KafkaException
+except ImportError:
+    Producer = None  # Fallback check for missing library during standalone run
+
+# Support both relative invocation (cd ingestion && python producer.py) and module invocation
+try:
+    from config import load_config
+    from log_generator import LogGenerator
+    from log_templates import SERVICES
+except ImportError:
+    from ingestion.config import load_config
+    from ingestion.log_generator import LogGenerator
+    from ingestion.log_templates import SERVICES
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse and return CLI arguments."""
+    """Parse and validate CLI arguments."""
     parser = argparse.ArgumentParser(
         description="LogFlow synthetic log producer — publishes to Kafka topic 'logs'."
     )
     parser.add_argument("--rate", type=int, default=10,
-                        help="Messages per second (default: 10)")
+                        help="Messages per second target (default: 10)")
     parser.add_argument("--duration", type=int, default=0,
                         help="Run duration in seconds; 0 = run forever (default: 0)")
-    parser.add_argument("--malformed-pct", type=int, default=0,
-                        choices=range(0, 101), metavar="[0-100]",
-                        help="Percentage of intentionally malformed messages (default: 0)")
+    parser.add_argument("--malformed-pct", type=int, default=0, choices=range(0, 101),
+                        metavar="[0-100]",
+                        help="Percentage of intentionally malformed messages [0-100] (default: 0)")
     parser.add_argument("--scenario", type=str, default="normal",
                         choices=["normal", "spike", "malformed"],
                         help="Load profile preset (default: normal)")
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    if args.rate <= 0:
+        parser.error("--rate must be a positive integer > 0")
+    if args.duration < 0:
+        parser.error("--duration cannot be negative")
+
+    return args
 
 
-def get_kafka_config() -> dict:
-    """
-    Build confluent-kafka Producer config from environment variables.
+class ProducerStats:
+    """Tracks message delivery metrics for console instrumentation."""
 
-    Returns
-    -------
-    dict
-        Config dict for confluent_kafka.Producer()
+    def __init__(self) -> None:
+        self.attempted: int = 0
+        self.delivered: int = 0
+        self.failed: int = 0
+        self.start_time: float = time.time()
 
-    Raises
-    ------
-    EnvironmentError
-        If KAFKA_BROKER is not set.
-    """
-    broker = os.environ.get("KAFKA_BROKER")
-    if not broker:
-        raise EnvironmentError(
-            "KAFKA_BROKER is not set. Copy .env.example → .env and fill in values."
-        )
-    return {
+    def delivery_callback(self, err: Any, msg: Any) -> None:
+        """Callback triggered on Kafka broker ack / delivery failure."""
+        if err is not None:
+            self.failed += 1
+        else:
+            self.delivered += 1
+
+    def print_periodic_report(self) -> None:
+        """Print readable console stats snapshot."""
+        elapsed = time.time() - self.start_time
+        rate = self.delivered / elapsed if elapsed > 0 else 0.0
+        print(f"[producer] Produced: {self.attempted} | Delivered: {self.delivered} | "
+              f"Failed: {self.failed} | Rate: {rate:.1f} msg/s")
+
+    def print_final_summary(self) -> None:
+        """Print final summary on exit."""
+        elapsed = time.time() - self.start_time
+        rate = self.delivered / elapsed if elapsed > 0 else 0.0
+        print("\n" + "=" * 60)
+        print("LogFlow Producer Execution Summary")
+        print("=" * 60)
+        print(f"Elapsed Time:       {elapsed:.2f} seconds")
+        print(f"Messages Attempted: {self.attempted}")
+        print(f"Messages Delivered: {self.delivered}")
+        print(f"Messages Failed:    {self.failed}")
+        print(f"Achieved Rate:      {rate:.2f} msg/s")
+        print("=" * 60)
+
+
+def create_kafka_producer(broker: str) -> Any:
+    """Build confluent_kafka Producer instance with optimized throughput settings."""
+    if Producer is None:
+        raise RuntimeError("confluent-kafka package is not installed. Install via requirements.txt")
+
+    config = {
         "bootstrap.servers": broker,
-        "acks": "all",              # wait for all in-sync replicas
+        "acks": "all",              # Wait for full in-sync replica acknowledgements
         "retries": 5,
-        "linger.ms": 10,            # micro-batching for throughput
+        "linger.ms": 10,            # Micro-batching for throughput target >= 2000 msg/s
+        "batch.num.messages": 1000,
     }
+    return Producer(config)
+
+
+def run_producer(args: argparse.Namespace) -> None:
+    """Main producer loop supporting normal, spike, and malformed modes."""
+    cfg = load_config()
+    print(f"[producer] Starting LogFlow Producer")
+    print(f"[producer] Broker: {cfg.kafka_broker} | Topic: {cfg.kafka_topic_logs}")
+    print(f"[producer] Scenario: {args.scenario} | Target Rate: {args.rate}/s | Duration: {args.duration}s | Malformed: {args.malformed_pct}%")
+
+    producer = create_kafka_producer(cfg.kafka_broker)
+    generator = LogGenerator(malformed_pct=args.malformed_pct, scenario=args.scenario)
+    stats = ProducerStats()
+
+    # Traffic Spike configuration defaults (burst every 10s for 3s duration at 5x target rate)
+    spike_interval_sec = 10.0
+    spike_duration_sec = 3.0
+    spike_multiplier = 5.0
+
+    last_report_time = time.time()
+    batch_start_time = time.time()
+    batch_count = 0
+
+    try:
+        while True:
+            now = time.time()
+            elapsed_total = now - stats.start_time
+
+            if args.duration > 0 and elapsed_total >= args.duration:
+                break
+
+            # Determine current rate limit based on scenario
+            current_target_rate = args.rate
+            if args.scenario == "spike":
+                cycle_time = (now - stats.start_time) % spike_interval_sec
+                if cycle_time < spike_duration_sec:
+                    current_target_rate = int(args.rate * spike_multiplier)
+
+            # Generate and serialize log
+            # Key MUST be service name to partition by service (REQ-5)
+            log_dict = generator.generate()
+            service_key = log_dict.get("service", "unknown-service")
+            if not isinstance(service_key, str):
+                service_key = str(service_key)
+
+            # Support malformed JSON string injection for invalid JSON cases
+            if log_dict.get("_invalid_json"):
+                value_bytes = b"{{invalid_json_payload: missing_quotes}"
+            else:
+                value_bytes = json.dumps(log_dict).encode("utf-8")
+
+            stats.attempted += 1
+            batch_count += 1
+
+            # Produce asynchronously
+            producer.produce(
+                topic=cfg.kafka_topic_logs,
+                key=service_key.encode("utf-8"),
+                value=value_bytes,
+                on_delivery=stats.delivery_callback
+            )
+
+            producer.poll(0)  # Serve queued delivery callbacks without blocking
+
+            # Rate pacing calculation per batch window
+            target_batch_size = max(1, int(current_target_rate * 0.05))
+            if batch_count >= target_batch_size:
+                batch_duration = time.time() - batch_start_time
+                expected_duration = batch_count / current_target_rate
+                sleep_time = expected_duration - batch_duration
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                batch_start_time = time.time()
+                batch_count = 0
+
+            # Periodic console reporting (every 3 seconds)
+            if time.time() - last_report_time >= 3.0:
+                stats.print_periodic_report()
+                last_report_time = time.time()
+
+    except KeyboardInterrupt:
+        print("\n[producer] Interrupted by user.")
+    finally:
+        print("[producer] Flushing remaining queued messages...")
+        producer.flush(timeout=10.0)
+        stats.print_final_summary()
 
 
 def main() -> None:
-    """
-    Main producer loop.
-
-    Stub flow (to be implemented):
-      1. Parse CLI args
-      2. Instantiate confluent_kafka.Producer with get_kafka_config()
-      3. Enter production loop:
-         a. Call log_templates.generate_log(service) for a random service
-         b. Optionally corrupt the message (if malformed-pct / scenario requires)
-         c. Serialise to JSON bytes
-         d. producer.produce(topic, key=service, value=message_bytes)
-         e. producer.poll(0)  — serve delivery callbacks
-         f. Sleep to honour --rate
-      4. On exit (duration elapsed or KeyboardInterrupt):
-         producer.flush()
-         Print summary: total sent, total failed, elapsed time
-    """
     args = parse_args()
-
-    print(f"[producer] Starting | scenario={args.scenario} rate={args.rate}/s "
-          f"duration={args.duration}s malformed={args.malformed_pct}%")
-    print("[producer] STUB — business logic not yet implemented.")
-    print(f"[producer] Would connect to broker: {os.environ.get('KAFKA_BROKER', '<not set>')}")
-    print(f"[producer] Would publish to topic : {os.environ.get('KAFKA_TOPIC_LOGS', 'logs')}")
+    run_producer(args)
 
 
 if __name__ == "__main__":
