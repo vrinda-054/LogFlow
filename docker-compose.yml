@@ -45,16 +45,16 @@ services:
     container_name: logflow-kafka
     hostname: kafka
     ports:
-      - "9092:9092"   # External (host) access
+      - "9092:29092"  # Host localhost:9092 maps to container port 29092 (PLAINTEXT_HOST)
       - "9093:9093"   # KRaft controller port
     environment:
       # KRaft — combined broker+controller role
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
@@ -66,7 +66,7 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka:9092"]
       interval: 10s
       timeout: 10s
       retries: 10
@@ -82,32 +82,39 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      "
-      echo '--- Creating Kafka topics ---'
+    entrypoint: []
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo '--- Waiting for Kafka to be ready ---'
+        until kafka-broker-api-versions --bootstrap-server kafka:9092 > /dev/null 2>&1; do
+          sleep 1
+        done
 
-      kafka-topics --bootstrap-server kafka:9092 \
-        --create --if-not-exists \
-        --topic logs \
-        --partitions 4 \
-        --replication-factor 1 \
-        --config retention.ms=86400000 \
-        --config cleanup.policy=delete
-      echo 'Topic [logs] created with 4 partitions.'
+        echo '--- Creating Kafka topics ---'
 
-      kafka-topics --bootstrap-server kafka:9092 \
-        --create --if-not-exists \
-        --topic logs-dlq \
-        --partitions 1 \
-        --replication-factor 1 \
-        --config retention.ms=604800000 \
-        --config cleanup.policy=delete
-      echo 'Topic [logs-dlq] created with 1 partition.'
+        kafka-topics --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic logs \
+          --partitions 4 \
+          --replication-factor 1 \
+          --config retention.ms=86400000 \
+          --config cleanup.policy=delete && \
+        echo 'Topic [logs] created with 4 partitions.'
 
-      kafka-topics --bootstrap-server kafka:9092 --list
-      echo '--- Topic init complete ---'
-      "
+        kafka-topics --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic logs-dlq \
+          --partitions 1 \
+          --replication-factor 1 \
+          --config retention.ms=604800000 \
+          --config cleanup.policy=delete && \
+        echo 'Topic [logs-dlq] created with 1 partition.'
+
+        kafka-topics --bootstrap-server kafka:9092 --list
+        echo '--- Topic init complete ---'
     restart: "no"
 
   # ---------------------------------------------------------------------------

@@ -15,7 +15,11 @@ Supported Scenarios / Modes:
 
 import random
 from typing import Any, Dict
-from ingestion.log_templates import generate_log, SERVICES
+
+try:
+    from log_templates import generate_log, SERVICES
+except ImportError:
+    from ingestion.log_templates import generate_log, SERVICES
 
 
 class LogGenerator:
