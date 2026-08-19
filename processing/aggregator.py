@@ -62,7 +62,10 @@ from confluent_kafka import Consumer, KafkaException
 from confluent_kafka.admin import AdminClient, ListConsumerGroupOffsetsRequest
 from confluent_kafka import TopicPartition
 
-from db.connection import get_connection
+try:
+    from processing.db.connection import get_connection
+except ImportError:  # pragma: no cover - fallback for direct script execution
+    from db.connection import get_connection
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(

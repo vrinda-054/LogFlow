@@ -78,19 +78,28 @@ LOGFLOW_SCHEMA = "logflow"
 
 def _get_database_url() -> str:
     """
-    Read and return DATABASE_URL from the environment.
+    Read the database URL from the environment.
 
-    Raises
-    ------
-    EnvironmentError
-        If DATABASE_URL is not set.
+    Prefer the explicit DATABASE_URL when present, but also support the shared
+    POSTGRES_* variables used by the repo's docker-compose and .env.example
+    contracts when DATABASE_URL is not provided.
     """
     url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise EnvironmentError(
-            "DATABASE_URL is not set. Copy .env.example → .env and fill in values."
-        )
-    return url
+    if url:
+        return url
+
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    dbname = os.environ.get("POSTGRES_DB", "logflow")
+    user = os.environ.get("POSTGRES_USER")
+    password = os.environ.get("POSTGRES_PASSWORD")
+
+    if user and password:
+        return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    if user:
+        return f"postgresql://{user}@{host}:{port}/{dbname}"
+
+    return f"postgresql://{host}:{port}/{dbname}"
 
 
 def get_connection():

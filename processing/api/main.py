@@ -62,7 +62,10 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from db.connection import get_session, get_engine
+try:
+    from processing.db.connection import get_session, get_engine
+except ImportError:  # pragma: no cover - fallback for direct script execution
+    from db.connection import get_session, get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -367,8 +370,8 @@ def get_dlq_messages(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        app,
         host=os.environ.get("FASTAPI_HOST", "0.0.0.0"),
         port=int(os.environ.get("FASTAPI_PORT", "8000")),
-        reload=True,
+        reload=False,
     )
