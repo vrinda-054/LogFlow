@@ -167,12 +167,13 @@ services:
       <<: *common-env
 
   # ---------------------------------------------------------------------------
-  # Placeholder service — Person 3 (processing/)
+  # Person 3 — processing/
   # ---------------------------------------------------------------------------
   processing:
-    image: busybox
+    build:
+      context: .
+      dockerfile: processing/Dockerfile
     container_name: logflow-processing
-    command: ["sh", "-c", "echo '[placeholder] processing/api not yet implemented' && sleep infinity"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -182,6 +183,8 @@ services:
       - "8000:8000"
     environment:
       <<: *common-env
+      PYTHONPATH: /app
+    command: ["python", "-m", "processing.api.main"]
 
   # ---------------------------------------------------------------------------
   # Placeholder service — Person 4 (dashboard/)

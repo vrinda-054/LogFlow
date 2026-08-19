@@ -54,42 +54,69 @@ Consumed by
 """
 
 import os
+import logging
 from contextlib import contextmanager
 
+import psycopg2
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker, Session
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# TODO (Person 3): uncomment and install psycopg2-binary, sqlalchemy
+# Module-level singleton for the SQLAlchemy engine.
+# Initialised lazily on first call to get_engine().
 # ---------------------------------------------------------------------------
-# import psycopg2
-# from sqlalchemy import create_engine
-# from sqlalchemy.orm import sessionmaker, Session
+_engine = None
+
+# ---------------------------------------------------------------------------
+# The LogFlow schema name used in processing/db/schema.sql.
+# All tables live under the 'logflow' schema.
+# ---------------------------------------------------------------------------
+LOGFLOW_SCHEMA = "logflow"
 
 
 def _get_database_url() -> str:
     """
-    Read and return DATABASE_URL from the environment.
+    Read the database URL from the environment.
 
-    Raises
-    ------
-    EnvironmentError
-        If DATABASE_URL is not set.
+    Prefer the explicit DATABASE_URL when present, but also support the shared
+    POSTGRES_* variables used by the repo's docker-compose and .env.example
+    contracts when DATABASE_URL is not provided.
     """
     url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise EnvironmentError(
-            "DATABASE_URL is not set. Copy .env.example → .env and fill in values."
-        )
-    return url
+    if url:
+        return url
+
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    dbname = os.environ.get("POSTGRES_DB", "logflow")
+    user = os.environ.get("POSTGRES_USER")
+    password = os.environ.get("POSTGRES_PASSWORD")
+
+    if user and password:
+        return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    if user:
+        return f"postgresql://{user}@{host}:{port}/{dbname}"
+
+    return f"postgresql://{host}:{port}/{dbname}"
 
 
 def get_connection():
     """
     Open and return a new psycopg2 database connection.
 
+    The connection has autocommit=False, so the caller is responsible for
+    calling conn.commit() or conn.rollback() and conn.close().
+
+    The search_path is automatically set to the 'logflow' schema so that
+    queries can reference tables without the schema prefix (e.g.,
+    ``processed_logs`` instead of ``logflow.processed_logs``).
+
     Returns
     -------
     psycopg2.extensions.connection
         A raw database connection with autocommit=False.
-        The caller must call conn.commit() or conn.rollback() and conn.close().
 
     Raises
     ------
@@ -98,13 +125,28 @@ def get_connection():
     psycopg2.OperationalError
         If the database is unreachable.
     """
-    # TODO: return psycopg2.connect(_get_database_url())
-    raise NotImplementedError("get_connection: install psycopg2-binary and implement")
+    url = _get_database_url()
+    conn = psycopg2.connect(url)
+    conn.autocommit = False
+
+    # Set the search_path so callers can use unqualified table names.
+    with conn.cursor() as cur:
+        cur.execute(f"SET search_path TO {LOGFLOW_SCHEMA}, public;")
+    conn.commit()
+
+    logger.debug("psycopg2 connection opened (search_path=%s)", LOGFLOW_SCHEMA)
+    return conn
 
 
 def get_engine():
     """
     Return a SQLAlchemy engine (singleton, thread-safe).
+
+    The engine uses a connection pool (pool_size=5, max_overflow=10) and
+    ``pool_pre_ping=True`` to automatically discard stale connections.
+
+    Every new connection in the pool automatically has its ``search_path``
+    set to the ``logflow`` schema via a SQLAlchemy ``connect`` event.
 
     Returns
     -------
@@ -112,11 +154,29 @@ def get_engine():
 
     Notes
     -----
-    Uses a connection pool (default pool_size=5). Safe for concurrent FastAPI
-    request handlers.
+    Thread-safe. The engine is created once and reused across all callers.
     """
-    # TODO: return create_engine(_get_database_url(), pool_pre_ping=True)
-    raise NotImplementedError("get_engine: install sqlalchemy and implement")
+    global _engine
+    if _engine is None:
+        url = _get_database_url()
+        _engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+        )
+
+        # Automatically set search_path for every new raw DBAPI connection.
+        @event.listens_for(_engine, "connect")
+        def _set_search_path(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute(f"SET search_path TO {LOGFLOW_SCHEMA}, public;")
+            cursor.close()
+            dbapi_connection.commit()
+
+        logger.info("SQLAlchemy engine created (pool_size=5)")
+
+    return _engine
 
 
 @contextmanager
@@ -127,21 +187,24 @@ def get_session():
     Usage
     -----
     with get_session() as session:
-        results = session.execute(...)
+        results = session.execute(text("SELECT ..."))
 
-    On clean exit: session.commit()
-    On exception : session.rollback()
-    Always       : session.close()
+    On clean exit : session.commit()
+    On exception  : session.rollback()
+    Always        : session.close()
+
+    Yields
+    ------
+    sqlalchemy.orm.Session
     """
-    # TODO:
-    # SessionLocal = sessionmaker(bind=get_engine())
-    # session = SessionLocal()
-    # try:
-    #     yield session
-    #     session.commit()
-    # except Exception:
-    #     session.rollback()
-    #     raise
-    # finally:
-    #     session.close()
-    raise NotImplementedError("get_session: install sqlalchemy and implement")
+    engine = get_engine()
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
