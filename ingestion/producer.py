@@ -140,7 +140,8 @@ def run_producer(args: argparse.Namespace) -> None:
     spike_multiplier = 5.0
 
     last_report_time = time.time()
-    batch_start_time = time.time()
+    stats.start_time = time.time()
+    next_batch_target_time = stats.start_time
     batch_count = 0
 
     try:
@@ -184,15 +185,19 @@ def run_producer(args: argparse.Namespace) -> None:
 
             producer.poll(0)  # Serve queued delivery callbacks without blocking
 
-            # Rate pacing calculation per batch window
-            target_batch_size = max(1, int(current_target_rate * 0.05))
+            # Rate pacing calculation using continuous schedule targeting to prevent sleep drift
+            target_batch_size = max(1, int(current_target_rate * 0.01))
             if batch_count >= target_batch_size:
-                batch_duration = time.time() - batch_start_time
-                expected_duration = batch_count / current_target_rate
-                sleep_time = expected_duration - batch_duration
+                pacing_rate = current_target_rate * 1.0008
+                next_batch_target_time += batch_count / pacing_rate
+                now = time.time()
+                # Reset schedule target if system lags significantly behind (> 0.5s)
+                if now - next_batch_target_time > 0.5:
+                    next_batch_target_time = now
+
+                sleep_time = next_batch_target_time - now
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-                batch_start_time = time.time()
                 batch_count = 0
 
             # Periodic console reporting (every 3 seconds)
