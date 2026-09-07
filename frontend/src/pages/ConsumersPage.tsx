@@ -12,22 +12,53 @@ const sampleLag: ConsumerLagResponse = {
   ],
 };
 
+const demoStatus: ConsumerStatusResponse = {
+  consumer: {
+    consumer_id: 'consumer-01',
+    status: 'RUNNING',
+    assigned_partitions: [0, 1],
+    processing_rate: 742,
+    consumer_lag: 342,
+    last_heartbeat: new Date().toISOString(),
+    backpressure_active: false,
+  },
+  partitions: [
+    { partition: 0, throughput: 742, current_lag: 72, assigned_consumer: 'consumer-01', health: 'HEALTHY' },
+    { partition: 1, throughput: 811, current_lag: 87, assigned_consumer: 'consumer-01', health: 'HEALTHY' },
+    { partition: 2, throughput: 631, current_lag: 131, assigned_consumer: 'consumer-02', health: 'HEALTHY' },
+    { partition: 3, throughput: 512, current_lag: 52, assigned_consumer: 'consumer-03', health: 'HEALTHY' },
+  ],
+  rebalancing: {
+    state: 'STABLE',
+    current_assignment: [0, 1, 2, 3],
+    after_recovery: 'AUTOMATIC_REBALANCE',
+  },
+};
+
 export default function ConsumersPage() {
   const [data, setData] = useState<ConsumerLagResponse>(sampleLag);
+  const [consumerStatus, setConsumerStatus] = useState<ConsumerStatusResponse>(demoStatus);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedPartition, setSelectedPartition] = useState(0);
-  const [consumerStatus, setConsumerStatus] = useState<ConsumerStatusResponse | null>(null);
+  const [isLive, setIsLive] = useState(false);
 
   const refresh = async () => {
-    try {
-      const [next, status] = await Promise.all([getConsumerLag(), getConsumerStatus()]);
-      setData(next);
-      setConsumerStatus(status);
+    const [lagResult, statusResult] = await Promise.allSettled([getConsumerLag(), getConsumerStatus()]);
+    if (lagResult.status === 'fulfilled') setData(lagResult.value);
+    if (statusResult.status === 'fulfilled') setConsumerStatus(statusResult.value);
+    if (lagResult.status === 'fulfilled' && statusResult.status === 'fulfilled') {
       setLastUpdated(new Date());
+      setIsLive(true);
       setError(null);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Unable to load consumer lag');
+    } else {
+      const requestError = lagResult.status === 'rejected'
+        ? lagResult.reason
+        : statusResult.status === 'rejected'
+          ? statusResult.reason
+          : undefined;
+      setIsLive(false);
+      setError(requestError instanceof Error ? requestError.message : 'Live API unavailable; showing demo data');
     }
   };
 
@@ -52,7 +83,7 @@ export default function ConsumersPage() {
           <p>Live Kafka consumer-group activity and partition assignment</p>
         </div>
         <div className="header-actions">
-          <span className="pill live">● LIVE</span>
+          <span className={`pill ${isLive ? 'live' : 'muted'}`}>● {isLive ? 'LIVE' : 'DEMO'}</span>
           <span className="pill muted">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Connecting…'}</span>
           <button className="small-btn" onClick={() => void refresh()}>Refresh</button>
         </div>
@@ -61,17 +92,16 @@ export default function ConsumersPage() {
       {error && <div className="error-banner" role="alert">Consumer API unavailable: {error}</div>}
 
       <div className="summary-row">
-       <div className={`summary-box ${consumerStatus?.consumer.status === 'RUNNING' ? 'active' : 'warning'}`}>Consumer Instance <strong>{consumerStatus?.consumer.consumer_id ?? '—'}</strong><span>{consumerStatus?.consumer.status ?? 'TELEMETRY UNAVAILABLE'}</span></div>
+       <div className={`summary-box ${consumerStatus.consumer.status === 'RUNNING' ? 'active' : 'warning'}`}>Consumer Instance <strong>{consumerStatus.consumer.consumer_id}</strong><span>{consumerStatus.consumer.status}</span></div>
         <div className="summary-box">Total Partitions <strong>{data.partitions.length}</strong><span>ASSIGNED</span></div>
-       <div className="summary-box">Processing Rate <strong>{consumerStatus ? `${consumerStatus.consumer.processing_rate.toFixed(1)} msg/s` : '—'}</strong><span>LIVE HEARTBEAT</span></div>
+       <div className="summary-box">Processing Rate <strong>{consumerStatus.consumer.processing_rate.toFixed(1)} msg/s</strong><span>{isLive ? 'LIVE HEARTBEAT' : 'DEMO RATE'}</span></div>
         <div className={`summary-box ${data.total_lag > 1500 ? 'warning' : ''}`}>Messages Behind <strong>{data.total_lag.toLocaleString()}</strong><span>{data.total_lag > 1500 ? 'WARNING' : 'HEALTHY'}</span></div>
       </div>
 
       <section className="panel full-panel">
-       <div className="panel-title-row"><span>Consumer Instances</span><span className="status-tag info">{consumerStatus?.consumer.last_heartbeat ? `HEARTBEAT ${new Date(consumerStatus.consumer.last_heartbeat).toLocaleTimeString()}` : 'WAITING'}</span></div>
+       <div className="panel-title-row"><span>Consumer Instances</span><span className="status-tag info">{isLive ? `HEARTBEAT ${new Date(consumerStatus.consumer.last_heartbeat).toLocaleTimeString()}` : 'DEMO SNAPSHOT'}</span></div>
        <div className="three-cards">
-         {consumerStatus ? (
-           <div className="consumer-card selected">
+         <div className="consumer-card selected">
              <div className="health-header"><span>{consumerStatus.consumer.consumer_id}</span><span className={`status-tag ${consumerStatus.consumer.status === 'RUNNING' ? 'running' : 'danger'}`}>{consumerStatus.consumer.status}</span></div>
              <div className="consumer-body">
                <div><label>Processing rate</label><strong>{consumerStatus.consumer.processing_rate.toFixed(1)} msg/s</strong></div>
@@ -80,8 +110,7 @@ export default function ConsumersPage() {
                <div><label>Backpressure</label><strong>{consumerStatus.consumer.backpressure_active ? 'ACTIVE' : 'CLEAR'}</strong></div>
              </div>
            </div>
-         ) : <div className="empty-state">Waiting for a consumer heartbeat snapshot</div>}
-       </div>
+         </div>
       </section>
 
       <section className="panel table-panel">
@@ -95,9 +124,9 @@ export default function ConsumersPage() {
               return (
                 <tr key={partitionId} className={selectedPartition === partitionId ? 'selected-row' : ''} onClick={() => setSelectedPartition(partitionId)}>
                   <td>P{partitionId}</td>
-                  <td>{consumerStatus?.partitions.find((item) => item.partition === partitionId)?.throughput.toFixed(1) ?? '—'} msg/s</td>
-                  <td className={lag > 1500 ? 'danger-text' : ''}>Lag {(consumerStatus?.partitions.find((item) => item.partition === partitionId)?.current_lag ?? lag).toLocaleString()}</td>
-                  <td>{consumerStatus?.partitions.find((item) => item.partition === partitionId)?.assigned_consumer ?? partition?.consumer_id ?? 'Unassigned'}</td>
+                  <td>{consumerStatus.partitions.find((item) => item.partition === partitionId)?.throughput.toFixed(1) ?? '—'} msg/s</td>
+                  <td className={lag > 1500 ? 'danger-text' : ''}>Lag {(consumerStatus.partitions.find((item) => item.partition === partitionId)?.current_lag ?? lag).toLocaleString()}</td>
+                  <td>{consumerStatus.partitions.find((item) => item.partition === partitionId)?.assigned_consumer ?? partition?.consumer_id ?? 'Unassigned'}</td>
                 </tr>
               );
             })}
@@ -135,10 +164,10 @@ export default function ConsumersPage() {
       <section className="rebalancing-panel panel">
         <div className="panel-title-row"><span>Rebalancing State</span><span className="status-tag info">COOPERATIVE-STICKY</span></div>
         <div className="rebalance-body">
-          <div className="rebalance-status red">{consumerStatus?.rebalancing.state ?? 'WAITING FOR TELEMETRY'}</div>
-          <div className="rebalance-status blue">After Recovery: {consumerStatus?.rebalancing.after_recovery ?? 'AUTOMATIC_REBALANCE'}</div>
+          <div className="rebalance-status red">{consumerStatus.rebalancing.state}</div>
+          <div className="rebalance-status blue">After Recovery: {consumerStatus.rebalancing.after_recovery}</div>
           <div className="rebalance-legend">
-            <span>Current assignment: {consumerStatus?.rebalancing.current_assignment.map((partition) => `P${partition}`).join(', ') || 'None'}</span>
+            <span>Current assignment: {consumerStatus.rebalancing.current_assignment.map((partition) => `P${partition}`).join(', ') || 'None'}</span>
             <span>Partitions are reassigned automatically after a worker restart</span>
           </div>
         </div>

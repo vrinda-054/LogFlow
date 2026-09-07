@@ -29,13 +29,53 @@ function toViewMessage(record: DlqRecord): ViewMessage {
   return { ...record, service, severity: 'ERROR', trace, message, payload };
 }
 
+const demoMessages: ViewMessage[] = [
+  {
+    id: 1217,
+    failed_at: '2026-09-07T15:46:23Z',
+    failure_reason: 'Invalid JSON',
+    retry_count: 3,
+    original_message: '{"service":"payment","trace_id":"tr-1a2","message":"Payment request payload malformed"}',
+    service: 'Payment',
+    severity: 'ERROR',
+    trace: 'tr-1a2',
+    message: 'Payment request payload malformed',
+    payload: '{\n  "service": "payment",\n  "payload": "{invalid json}"\n}',
+  },
+  {
+    id: 1218,
+    failed_at: '2026-09-07T15:45:27Z',
+    failure_reason: 'Shutdown',
+    retry_count: 2,
+    original_message: '{"service":"api","trace_id":"tr-4c9","message":"Worker shutdown while reading from queue"}',
+    service: 'API',
+    severity: 'ERROR',
+    trace: 'tr-4c9',
+    message: 'Worker shutdown while reading from queue',
+    payload: '{\n  "service": "api",\n  "shutdown": true\n}',
+  },
+  {
+    id: 1219,
+    failed_at: '2026-09-07T15:45:15Z',
+    failure_reason: 'Invalid JWT',
+    retry_count: 1,
+    original_message: '{"service":"auth","trace_id":"tr-12d","message":"JWT payload missing required claims"}',
+    service: 'Authentication',
+    severity: 'WARN',
+    trace: 'tr-12d',
+    message: 'JWT payload missing required claims',
+    payload: '{\n  "service": "auth",\n  "claim": "missing"\n}',
+  },
+];
+
 export default function DlqInspectorPage() {
-  const [messages, setMessages] = useState<ViewMessage[]>([]);
-  const [total, setTotal] = useState(0);
+  const [messages, setMessages] = useState<ViewMessage[]>(demoMessages);
+  const [total, setTotal] = useState(demoMessages.length);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [service, setService] = useState('ALL');
   const [error, setError] = useState<string | null>(null);
+  const [isLive, setIsLive] = useState(false);
 
   const refresh = async () => {
     try {
@@ -44,8 +84,10 @@ export default function DlqInspectorPage() {
       setMessages(next);
       setTotal(response.total);
       setSelectedId((current) => current ?? next[0]?.id ?? null);
+      setIsLive(true);
       setError(null);
     } catch (requestError) {
+      setIsLive(false);
       setError(requestError instanceof Error ? requestError.message : 'Unable to load DLQ messages');
     }
   };
@@ -78,7 +120,7 @@ export default function DlqInspectorPage() {
           <p>Inspect messages that failed processing and were isolated from the main pipeline</p>
         </div>
         <div className="header-actions">
-          <span className="pill live">● LIVE</span>
+          <span className={`pill ${isLive ? 'live' : 'muted'}`}>● {isLive ? 'LIVE' : 'DEMO'}</span>
           <button className="small-btn" onClick={() => void refresh()}>Refresh</button>
         </div>
       </header>
