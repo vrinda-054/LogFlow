@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import ConsumersPage from './pages/ConsumersPage';
+import DlqInspectorPage from './pages/DlqInspectorPage';
 
 type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
 type LogEntry = {
@@ -55,12 +57,6 @@ const baseEvents = [
   { ts: '18:59:39', service: 'WARN', text: 'Partition 2 lag spike detected' },
   { ts: '18:59:45', service: 'ERROR', text: 'Consumer 1 retry queue exceeded threshold' },
   { ts: '18:59:52', service: 'INFO', text: 'Kafka cluster state stable' },
-];
-
-const consumerPartitionData = [
-  { id: 'Consumer 1', status: 'RUNNING', rate: '942 msg/s', lag: '124', health: 'Healthy' },
-  { id: 'Consumer 2', status: 'RUNNING', rate: '851 msg/s', lag: '87', health: 'Healthy' },
-  { id: 'Consumer 3', status: 'PAUSED', rate: '425 msg/s', lag: '1,842', health: 'Warning' },
 ];
 
 const baseDlqData: DlqEntry[] = [
@@ -256,131 +252,6 @@ function OverviewPage() {
   );
 }
 
-function ConsumersPage() {
-  const navigate = useNavigate();
-  const [selectedConsumer, setSelectedConsumer] = useState('Consumer 1');
-  const [selectedPartition, setSelectedPartition] = useState('P0');
-  const [members, setMembers] = useState(consumerPartitionData);
-
-  const refreshConsumers = () => {
-    setMembers((prev) => prev.map((entry, idx) => ({
-      ...entry,
-      rate: `${(900 + idx * 80 + Math.floor(Math.random() * 70))} msg/s`,
-      lag: `${(100 + idx * 40 + Math.floor(Math.random() * 120))}`,
-      status: Math.random() > 0.15 ? 'RUNNING' : 'PAUSED',
-      health: Math.random() > 0.15 ? 'Healthy' : 'Warning',
-    })));
-  };
-
-  return (
-    <AppShell>
-      <div className="page-frame consumer-page">
-        <header className="page-header">
-          <div>
-            <h1>Consumer &amp; Partition View</h1>
-            <p>Live Kafka consumer group and partition assignment</p>
-          </div>
-          <div className="header-actions">
-            <span className="pill live">● LIVE</span>
-            <span className="pill muted">Last updated 2m ago</span>
-            <button className="small-btn" onClick={refreshConsumers}>Refresh</button>
-          </div>
-        </header>
-
-        <div className="summary-row">
-          <div className="summary-box active">Active Consumers <strong>3 / 3</strong><span>HEALTHY</span></div>
-          <div className="summary-box">Total Partitions <strong>4</strong><span>ASSIGNED</span></div>
-          <div className="summary-box">Total Throughput <strong>2,184</strong><span>HEALTHY</span></div>
-          <div className="summary-box warning">Messages Behind <strong>342</strong><span>WARNING</span></div>
-        </div>
-
-        <div className="consumer-grid">
-          <section className="panel full-panel">
-            <div className="panel-title-row"><span>Consumer Instances</span></div>
-            <div className="three-cards">
-              {members.map((consumer) => {
-                const isSelected = selectedConsumer === consumer.id;
-                return (
-                  <button type="button" key={consumer.id} className={`consumer-card interactive-card ${isSelected ? 'selected' : ''}`} onClick={() => setSelectedConsumer(consumer.id)}>
-                    <div className="health-header"><span>{consumer.id}</span><span className="status-tag running">{consumer.status}</span></div>
-                    <div className="consumer-body">
-                      <div><label>Consumer ID</label><strong>{consumer.id}</strong></div>
-                      <div><label>Processing rate</label><strong>{consumer.rate}</strong></div>
-                      <div><label>Lag</label><strong>{consumer.lag}</strong></div>
-                      <div><label>Health</label><strong>{consumer.health}</strong></div>
-                    </div>
-                    <div className="mini-assign"><span>Partition assignment</span><div className="mini-meter"><i style={{ width: consumer.lag.includes('1,842') ? '72%' : '60%' }} /></div></div>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        </div>
-
-        <section className="panel table-panel">
-          <div className="panel-title-row"><span>Kafka Partition Assignment</span></div>
-          <table className="partition-table">
-            <thead>
-              <tr><th>PART</th><th>THROUGHPUT</th><th>CURRENT LAG</th><th>CONSUMER</th></tr>
-            </thead>
-            <tbody>
-              {['P0', 'P1', 'P2', 'P3'].map((part, idx) => {
-                const consumerName = idx % 2 === 0 ? 'Consumer 1' : 'Consumer 2';
-                const isSelected = selectedPartition === part;
-                return (
-                  <tr key={part} className={isSelected ? 'selected-row' : ''} onClick={() => setSelectedPartition(part)}>
-                    <td>{part}</td>
-                    <td>{600 + idx * 50} msg/s</td>
-                    <td>Lag {120 + idx * 35}</td>
-                    <td>{consumerName}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </section>
-
-        <div className="lower-split">
-          <section className="panel consumer-lag-panel">
-            <div className="panel-title-row"><span>Consumer Lag by Partition</span></div>
-            <div className="partition-rows">
-              {['P0', 'P1', 'P2', 'P3'].map((part, idx) => (
-                <button type="button" key={part} className={`partition-item interactive-card ${selectedPartition === part ? 'selected' : ''}`} onClick={() => setSelectedPartition(part)}>
-                  <span>{part}</span>
-                  <div className="mini-bar green" style={{ width: idx === 2 ? '92%' : '72%' }} />
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel event-inline-panel">
-            <div className="panel-title-row"><span>Consumer Group Events</span></div>
-            <ul className="event-list compact">
-              {baseEvents.map((row, idx) => (
-                <li key={idx}><span className="event-time">{row.ts}</span><span className={`event-service ${row.service.toLowerCase()}`}>{row.service}</span><span>{row.text}</span></li>
-              ))}
-            </ul>
-          </section>
-        </div>
-
-        <div className="rebalancing-panel panel">
-          <div className="panel-title-row"><span>Rebalancing State</span></div>
-          <div className="rebalance-body">
-            <div className="rebalance-status red">{selectedConsumer} {selectedConsumer === 'Consumer 3' ? 'stopped' : 'healthy'}</div>
-            <div className="rebalance-status blue">After Recovery</div>
-            <div className="rebalance-legend">
-              <button type="button" className="mini-action" onClick={() => navigate('/dlq')}>View DLQ</button>
-              <span>Consumer 1</span>
-              <span>Consumer 2</span>
-              <span>Consumer 3</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </AppShell>
-  );
-}
-
 function DlqPage() {
   const [dlqData, setDlqData] = useState(baseDlqData);
   const [selectedId, setSelectedId] = useState(baseDlqData[0].id);
@@ -400,7 +271,7 @@ function DlqPage() {
   const selectedMessage = visibleRows.find((item) => item.id === selectedId) ?? dlqData[0];
 
   const refreshDlq = () => {
-    const next = [{
+    const newEntry: DlqEntry = {
       id: `DLQ-${Math.floor(Math.random() * 1000).toString().padStart(6, '0')}`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
       service: 'API',
@@ -411,7 +282,8 @@ function DlqPage() {
       payload: '{"service":"api","payload":"malformed"}',
       retryCount: 1,
       status: 'PENDING',
-    }, ...dlqData].slice(0, 6);
+    };
+    const next = [newEntry, ...dlqData].slice(0, 6);
     setDlqData(next);
     setSelectedId(next[0].id);
   };
@@ -529,7 +401,7 @@ function DlqPage() {
 }
 
 function LogsPage() {
-  const [logs, setLogs] = useState(baseLogData);
+  const [logs, setLogs] = useState<LogEntry[]>(baseLogData);
   const [live, setLive] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [levelFilter, setLevelFilter] = useState<LogLevel>('ALL');
@@ -540,11 +412,12 @@ function LogsPage() {
   useEffect(() => {
     if (!live) return;
     const timer = window.setInterval(() => {
+      const level: LogEntry['level'] = Math.random() > 0.7 ? 'WARN' : 'INFO';
       setLogs((prev) => [
         {
           id: prev[0] ? prev[0].id + 1 : 1,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
-          level: Math.random() > 0.7 ? 'WARN' : 'INFO',
+          level,
           service: ['API', 'PAYMENT', 'DATABASE', 'AUTH'][Math.floor(Math.random() * 4)],
           consumer: `C${Math.floor(Math.random() * 3) + 1}`,
           trace: `tr-${Math.random().toString(16).slice(2, 7)}`,
@@ -786,7 +659,7 @@ function App() {
     <Routes>
       <Route path="/" element={<OverviewPage />} />
       <Route path="/consumers" element={<ConsumersPage />} />
-      <Route path="/dlq" element={<DlqPage />} />
+      <Route path="/dlq" element={<DlqInspectorPage />} />
       <Route path="/logs" element={<LogsPage />} />
       <Route path="/scenarios" element={<ScenariosPage />} />
     </Routes>
