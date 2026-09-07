@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import { getConsumerLag, getDlqMessages, type ConsumerLagResponse, type DlqRecord } from './api';
 
 type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
 type LogEntry = {
@@ -261,16 +262,31 @@ function ConsumersPage() {
   const [selectedConsumer, setSelectedConsumer] = useState('Consumer 1');
   const [selectedPartition, setSelectedPartition] = useState('P0');
   const [members, setMembers] = useState(consumerPartitionData);
+  const [lagData, setLagData] = useState<ConsumerLagResponse | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
 
-  const refreshConsumers = () => {
-    setMembers((prev) => prev.map((entry, idx) => ({
-      ...entry,
-      rate: `${(900 + idx * 80 + Math.floor(Math.random() * 70))} msg/s`,
-      lag: `${(100 + idx * 40 + Math.floor(Math.random() * 120))}`,
-      status: Math.random() > 0.15 ? 'RUNNING' : 'PAUSED',
-      health: Math.random() > 0.15 ? 'Healthy' : 'Warning',
-    })));
+  const refreshConsumers = async () => {
+    try {
+      const response = await getConsumerLag();
+      setLagData(response);
+      setLastUpdated(new Date());
+      setApiError(null);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : 'Unable to load consumer lag');
+    }
   };
+
+  useEffect(() => {
+    void refreshConsumers();
+    const timer = window.setInterval(() => void refreshConsumers(), 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const lagByPartition = new Map(
+    lagData?.partitions.map((partition) => [partition.partition_id, partition]) ?? [],
+  );
+  const totalLag = lagData?.total_lag ?? members.reduce((sum, member) => sum + Number(member.lag.replace(',', '')), 0);
 
   return (
     <AppShell>
@@ -282,16 +298,17 @@ function ConsumersPage() {
           </div>
           <div className="header-actions">
             <span className="pill live">● LIVE</span>
-            <span className="pill muted">Last updated 2m ago</span>
-            <button className="small-btn" onClick={refreshConsumers}>Refresh</button>
+            <span className="pill muted">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Connecting…'}</span>
+            <button className="small-btn" onClick={() => void refreshConsumers()}>Refresh</button>
           </div>
         </header>
+        {apiError && <div className="error-banner" role="alert">Consumer API unavailable: {apiError}</div>}
 
         <div className="summary-row">
           <div className="summary-box active">Active Consumers <strong>3 / 3</strong><span>HEALTHY</span></div>
           <div className="summary-box">Total Partitions <strong>4</strong><span>ASSIGNED</span></div>
           <div className="summary-box">Total Throughput <strong>2,184</strong><span>HEALTHY</span></div>
-          <div className="summary-box warning">Messages Behind <strong>342</strong><span>WARNING</span></div>
+          <div className={`summary-box ${totalLag > 1500 ? 'warning' : ''}`}>Messages Behind <strong>{totalLag.toLocaleString()}</strong><span>{totalLag > 1500 ? 'WARNING' : 'HEALTHY'}</span></div>
         </div>
 
         <div className="consumer-grid">
@@ -325,13 +342,14 @@ function ConsumersPage() {
             </thead>
             <tbody>
               {['P0', 'P1', 'P2', 'P3'].map((part, idx) => {
-                const consumerName = idx % 2 === 0 ? 'Consumer 1' : 'Consumer 2';
+                const partition = lagByPartition.get(idx);
+                const consumerName = partition?.consumer_id ?? (idx % 2 === 0 ? 'Consumer 1' : 'Consumer 2');
                 const isSelected = selectedPartition === part;
                 return (
                   <tr key={part} className={isSelected ? 'selected-row' : ''} onClick={() => setSelectedPartition(part)}>
                     <td>{part}</td>
                     <td>{600 + idx * 50} msg/s</td>
-                    <td>Lag {120 + idx * 35}</td>
+                    <td className={partition && partition.lag > 1500 ? 'danger-text' : ''}>Lag {(partition?.lag ?? 0).toLocaleString()}</td>
                     <td>{consumerName}</td>
                   </tr>
                 );
@@ -344,12 +362,15 @@ function ConsumersPage() {
           <section className="panel consumer-lag-panel">
             <div className="panel-title-row"><span>Consumer Lag by Partition</span></div>
             <div className="partition-rows">
-              {['P0', 'P1', 'P2', 'P3'].map((part, idx) => (
+              {['P0', 'P1', 'P2', 'P3'].map((part, idx) => {
+                const lag = lagByPartition.get(idx)?.lag ?? 0;
+                return (
                 <button type="button" key={part} className={`partition-item interactive-card ${selectedPartition === part ? 'selected' : ''}`} onClick={() => setSelectedPartition(part)}>
                   <span>{part}</span>
-                  <div className="mini-bar green" style={{ width: idx === 2 ? '92%' : '72%' }} />
+                  <div className={`mini-bar ${lag > 1500 ? 'red' : 'green'}`} style={{ width: `${Math.min(100, Math.max(8, lag / 20))}%` }} />
                 </button>
-              ))}
+                );
+              })}
             </div>
           </section>
 
@@ -387,6 +408,9 @@ function DlqPage() {
   const [search, setSearch] = useState('');
   const [severityFilter, setSeverityFilter] = useState<'ALL' | 'ERROR' | 'WARN'>('ALL');
   const [serviceFilter, setServiceFilter] = useState('ALL');
+  const [apiTotal, setApiTotal] = useState<number | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   const visibleRows = useMemo(() => {
     return dlqData.filter((entry) => {
@@ -399,22 +423,57 @@ function DlqPage() {
 
   const selectedMessage = visibleRows.find((item) => item.id === selectedId) ?? dlqData[0];
 
-  const refreshDlq = () => {
-    const next = [{
-      id: `DLQ-${Math.floor(Math.random() * 1000).toString().padStart(6, '0')}`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
-      service: 'API',
+  const mapDlqRecord = (record: DlqRecord): DlqEntry => {
+    let payload = record.original_message;
+    let service = 'Unknown';
+    let trace = '—';
+    let message = record.failure_reason;
+
+    try {
+      const parsed = JSON.parse(record.original_message) as Record<string, unknown>;
+      payload = JSON.stringify(parsed, null, 2);
+      service = typeof parsed.service === 'string' ? parsed.service : service;
+      trace = typeof parsed.trace_id === 'string' ? parsed.trace_id : trace;
+      message = typeof parsed.message === 'string' ? parsed.message : message;
+    } catch {
+      // Raw malformed payloads are expected in the DLQ and remain inspectable as text.
+    }
+
+    return {
+      id: String(record.id),
+      timestamp: new Date(record.failed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+      service,
       severity: 'ERROR',
-      reason: 'Malformed JSON',
-      trace: `tr-${Math.random().toString(16).slice(2, 7)}`,
-      message: 'Request payload could not be parsed',
-      payload: '{"service":"api","payload":"malformed"}',
-      retryCount: 1,
+      reason: record.failure_reason,
+      trace,
+      message,
+      payload,
+      retryCount: record.retry_count,
       status: 'PENDING',
-    }, ...dlqData].slice(0, 6);
-    setDlqData(next);
-    setSelectedId(next[0].id);
+    };
   };
+
+  const refreshDlq = async () => {
+    try {
+      const response = await getDlqMessages();
+      const next = response.messages.map(mapDlqRecord);
+      setDlqData(next);
+      setApiTotal(response.total);
+      setLastUpdated(new Date());
+      setApiError(null);
+      if (next.length > 0 && !next.some((entry) => entry.id === selectedId)) {
+        setSelectedId(next[0].id);
+      }
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : 'Unable to load DLQ messages');
+    }
+  };
+
+  useEffect(() => {
+    void refreshDlq();
+    const timer = window.setInterval(() => void refreshDlq(), 5000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const handleRetry = (entry: DlqEntry) => {
     setDlqData((prev) => prev.map((item) => item.id === entry.id ? { ...item, status: 'RETRIED', retryCount: item.retryCount + 1 } : item));
@@ -438,17 +497,18 @@ function DlqPage() {
           </div>
           <div className="header-actions">
             <span className="pill live">● LIVE</span>
-            <span className="pill muted">Updated 2s ago</span>
-            <button className="small-btn" onClick={refreshDlq}>Refresh</button>
+            <span className="pill muted">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Connecting…'}</span>
+            <button className="small-btn" onClick={() => void refreshDlq()}>Refresh</button>
           </div>
         </header>
+        {apiError && <div className="error-banner" role="alert">DLQ API unavailable: {apiError}</div>}
 
         <div className="dlq-metrics">
-          <div className="metric-box"><strong>{dlqData.length}</strong><span>Total Failed Messages</span></div>
+          <div className="metric-box"><strong>{apiTotal ?? dlqData.length}</strong><span>Total Failed Messages</span></div>
           <div className="metric-box"><strong>{dlqData.filter((item) => item.status === 'RETRIED').length}</strong><span>Retried Today</span></div>
-          <div className="metric-box accent"><strong>{(dlqData.reduce((sum, item) => sum + item.retryCount, 0) / dlqData.length).toFixed(1)}</strong><span>Average Retry Count</span></div>
+          <div className="metric-box accent">          <strong>{dlqData.length ? (dlqData.reduce((sum, item) => sum + item.retryCount, 0) / dlqData.length).toFixed(1) : '0.0'}</strong><span>Average Retry Count</span></div>
           <div className="metric-box alt">
-            <strong>{dlqData[0].reason}</strong>
+          <strong>{dlqData[0]?.reason ?? 'None'}</strong>
             <span>Top Failure Reason</span>
           </div>
         </div>
@@ -471,7 +531,7 @@ function DlqPage() {
 
         <div className="dlq-content">
           <section className="panel table-panel large-table">
-            <div className="panel-title-row"><span>Dead-Lettered Messages</span></div>
+            <div className="panel-title-row"><span>Dead-Lettered Messages {apiTotal !== null && `(${apiTotal})`}</span></div>
             <table className="dlq-table">
               <thead>
                 <tr><th>Timestamp</th><th>Service</th><th>Severity</th><th>Reason</th><th>Trace ID</th><th>Status</th><th>Action</th></tr>
@@ -502,24 +562,34 @@ function DlqPage() {
           <aside className="side-panel detail-panel">
             <div className="detail-card">
               <div className="detail-header">Message Details</div>
-              <div className="detail-key">ID <span>{selectedMessage.id}</span></div>
-              <div className="detail-key">Service <span>{selectedMessage.service}</span></div>
-              <div className="detail-key">Failure <span>{selectedMessage.reason}</span></div>
-              <div className="detail-key">Trace ID <span>{selectedMessage.trace}</span></div>
-              <div className="detail-key">Retries <span>{selectedMessage.retryCount}</span></div>
-              <div className="preview-box"><code>{selectedMessage.payload}</code></div>
-              <div className="detail-actions">
-                <button className="mini-button" onClick={() => copyPayload(selectedMessage.payload)}>Copy Payload</button>
-                <button className="mini-button alt" onClick={() => handleRetry(selectedMessage)}>Retry</button>
-              </div>
+              {selectedMessage ? (
+                <>
+                  <div className="detail-key">ID <span>{selectedMessage.id}</span></div>
+                  <div className="detail-key">Service <span>{selectedMessage.service}</span></div>
+                  <div className="detail-key">Failure <span>{selectedMessage.reason}</span></div>
+                  <div className="detail-key">Trace ID <span>{selectedMessage.trace}</span></div>
+                  <div className="detail-key">Retries <span>{selectedMessage.retryCount}</span></div>
+                  <div className="preview-box"><code>{selectedMessage.payload}</code></div>
+                  <div className="detail-actions">
+                    <button className="mini-button" onClick={() => copyPayload(selectedMessage.payload)}>Copy Payload</button>
+                    <button className="mini-button alt" onClick={() => handleRetry(selectedMessage)}>Retry</button>
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">No DLQ messages found</div>
+              )}
             </div>
             <div className="detail-card">
               <div className="detail-header">Retry History</div>
-              <ul className="retry-list">
-                <li>Attempt 1 <span>{selectedMessage.retryCount >= 1 ? 'FAILED' : 'PENDING'}</span></li>
-                <li>Attempt 2 <span>{selectedMessage.retryCount >= 2 ? 'FAILED' : 'PENDING'}</span></li>
-                <li>Attempt 3 <span>{selectedMessage.retryCount >= 3 ? 'FAILED' : 'PENDING'}</span></li>
-              </ul>
+              {selectedMessage ? (
+                <ul className="retry-list">
+                  <li>Attempt 1 <span>{selectedMessage.retryCount >= 1 ? 'FAILED' : 'PENDING'}</span></li>
+                  <li>Attempt 2 <span>{selectedMessage.retryCount >= 2 ? 'FAILED' : 'PENDING'}</span></li>
+                  <li>Attempt 3 <span>{selectedMessage.retryCount >= 3 ? 'FAILED' : 'PENDING'}</span></li>
+                </ul>
+              ) : (
+                <div className="empty-state">No retry history</div>
+              )}
             </div>
           </aside>
         </div>
@@ -544,7 +614,7 @@ function LogsPage() {
         {
           id: prev[0] ? prev[0].id + 1 : 1,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
-          level: Math.random() > 0.7 ? 'WARN' : 'INFO',
+          level: (Math.random() > 0.7 ? 'WARN' : 'INFO') as 'WARN' | 'INFO',
           service: ['API', 'PAYMENT', 'DATABASE', 'AUTH'][Math.floor(Math.random() * 4)],
           consumer: `C${Math.floor(Math.random() * 3) + 1}`,
           trace: `tr-${Math.random().toString(16).slice(2, 7)}`,
