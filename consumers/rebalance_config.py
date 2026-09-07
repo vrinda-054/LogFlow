@@ -1,126 +1,88 @@
-"""
-consumers/rebalance_config.py — Person 2 (Consumer Layer)
-===========================================================
+"""Consumer-group configuration and cooperative rebalance callbacks."""
 
-Role
-----
-Centralises Kafka consumer group rebalance settings. Provides a factory
-function that returns a fully-configured consumer config dict ready for
-confluent_kafka.Consumer(). All consumer instances in the group MUST use
-these settings to ensure consistent rebalance behaviour.
+from __future__ import annotations
 
-Why Cooperative-Sticky Rebalance?
-----------------------------------
-The default eager rebalance protocol revokes ALL partitions from ALL
-consumers at the start of every rebalance, causing processing gaps.
-The cooperative-sticky protocol minimises disruption:
-  - Only the partitions that need to move are revoked.
-  - Consumers retain their other partitions and keep processing.
-  - Stickiness ensures consumers tend to re-acquire the same partitions
-    across rebalances, which helps locality (e.g. in-memory aggregator state).
-
-Upstream caller : consumers/consumer.py (imports get_consumer_config())
-No downstream contract — this is purely configuration.
-
-Input
------
-  Environment variables:
-    KAFKA_BROKER           : Kafka bootstrap server (required)
-    KAFKA_CONSUMER_GROUP   : Consumer group ID (default: logflow-group)
-    KAFKA_TOPIC_LOGS       : Topic to subscribe to (default: logs)
-
-Output
-------
-  Returns a dict suitable for confluent_kafka.Consumer(config).
-"""
-
+import json
+import logging
 import os
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
+RebalanceEventName = Literal["partition_assigned", "group_stable", "partition_revoked", "reassignment"]
 
 
-def get_consumer_config(
-    extra_config: dict | None = None,
-) -> dict:
-    """
-    Build and return the confluent-kafka Consumer configuration dict.
+@dataclass(frozen=True)
+class RebalanceEvent:
+    """Stable event contract for assignment and reassignment observability."""
 
-    Parameters
-    ----------
-    extra_config : dict | None
-        Optional overrides to merge into the base configuration.
-        Useful for test fixtures or per-instance tuning.
+    timestamp: str
+    consumer_id: str
+    event: RebalanceEventName
+    partition: int | None
+    topic: str | None
 
-    Returns
-    -------
-    dict
-        Full consumer configuration ready for confluent_kafka.Consumer().
 
-    Raises
-    ------
-    EnvironmentError
-        If KAFKA_BROKER is not set.
-    """
+def _emit(
+    consumer: Any, event_name: RebalanceEventName, partition: Any = None, consumer_id: str | None = None
+) -> RebalanceEvent:
+    event = RebalanceEvent(
+        datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        consumer_id or str(getattr(consumer, "consumer_id", os.environ.get("CONSUMER_ID", "unknown"))),
+        event_name,
+        getattr(partition, "partition", None),
+        getattr(partition, "topic", None),
+    )
+    logger.info("event=%s", json.dumps(asdict(event), sort_keys=True))
+    return event
+
+
+def on_assign(consumer: Any, partitions: list[Any], consumer_id: str | None = None) -> None:
+    """Emit one assignment event per partition, then a group-stable event."""
+    for partition in partitions:
+        _emit(consumer, "partition_assigned", partition, consumer_id)
+    _emit(consumer, "group_stable", consumer_id=consumer_id)
+
+
+def on_revoke(consumer: Any, partitions: list[Any], consumer_id: str | None = None) -> None:
+    """Commit safely owned offsets and emit revoke/reassignment events."""
+    if partitions:
+        try:
+            consumer.commit(offsets=partitions, asynchronous=False)
+        except Exception as exc:
+            logger.warning("offset commit during revoke failed: %s", exc)
+    for partition in partitions:
+        _emit(consumer, "partition_revoked", partition, consumer_id)
+        _emit(consumer, "reassignment", partition, consumer_id)
+
+
+def _on_error(error: Any) -> None:
+    """Log a Kafka client-level error without interrupting polling."""
+    logger.error("Kafka client error: %s", error)
+
+
+def get_consumer_config(extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build the common manual-commit, cooperative-sticky Consumer config."""
     broker = os.environ.get("KAFKA_BROKER")
     if not broker:
         raise EnvironmentError("KAFKA_BROKER not set. See .env.example.")
-
-    config = {
-        # ---------------------------------------------------------------
-        # Connection
-        # ---------------------------------------------------------------
+    config: dict[str, Any] = {
         "bootstrap.servers": broker,
-        "group.id":          os.environ.get("KAFKA_CONSUMER_GROUP", "logflow-group"),
-
-        # ---------------------------------------------------------------
-        # Offset behaviour
-        # ---------------------------------------------------------------
-        "auto.offset.reset":  "earliest",   # consume from beginning if no committed offset
-        "enable.auto.commit": False,         # manual commit for at-least-once guarantees
-
-        # ---------------------------------------------------------------
-        # Cooperative-sticky rebalance (REQ-related: minimise processing gaps)
-        # ---------------------------------------------------------------
+        "group.id": os.environ.get("KAFKA_CONSUMER_GROUP", "logflow-group"),
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": False,
         "partition.assignment.strategy": "cooperative-sticky",
-
-        # ---------------------------------------------------------------
-        # Session & heartbeat tuning
-        # ---------------------------------------------------------------
-        "session.timeout.ms":      30_000,  # 30s — declare consumer dead after this
-        "heartbeat.interval.ms":    9_000,  # 9s  — must be < session.timeout / 3
-        "max.poll.interval.ms":   300_000,  # 5min — max time between poll() calls
-                                             # (increase if processing is slow)
-
-        # ---------------------------------------------------------------
-        # Fetch tuning
-        # ---------------------------------------------------------------
-        "fetch.min.bytes":           1,
-        "fetch.max.wait.ms":       500,
-        "max.partition.fetch.bytes": 1_048_576,  # 1 MiB per partition per fetch
-
-        # ---------------------------------------------------------------
-        # Error handling
-        # ---------------------------------------------------------------
+        "session.timeout.ms": 30_000,
+        "heartbeat.interval.ms": 9_000,
+        "max.poll.interval.ms": int(os.environ.get("KAFKA_MAX_POLL_INTERVAL_MS", "300000")),
         "error_cb": _on_error,
     }
-
     if extra_config:
         config.update(extra_config)
-
     return config
 
 
-def _on_error(error) -> None:
-    """
-    Global error callback for the consumer.
-    Logs Kafka client-level errors (not message-level errors).
-
-    Parameters
-    ----------
-    error : confluent_kafka.KafkaError
-    """
-    print(f"[rebalance_config] Kafka client error: {error}")
-    # TODO: integrate with a monitoring/alerting system
-
-
 def get_topic() -> str:
-    """Return the configured log topic name from environment."""
-    return os.environ.get("KAFKA_TOPIC_LOGS", "logs")
+    """Return the raw-log topic name shared with the producer."""
+    return os.environ.get("KAFKA_TOPIC_LOGS", "logs-raw")
