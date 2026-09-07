@@ -89,8 +89,8 @@ flowchart TD
 ┌──────────────────────────────────────────────────────────────────────┐
 │                          LogFlow Pipeline                            │
 │                                                                      │
-│  [Log Generator]──→[Kafka: logs (4 partitions)]──→[Consumer Group]  │
-│    producer.py          KRaft, no ZK               3 × consumer.py  │
+│  [Log Generator]──→[Kafka: logs (4 partitions)]──→[Consumer Group]   │
+│    producer.py          KRaft, no ZK               3 × consumer.py   │
 │    --scenario                                      rebalance_config  │
 │                                                         │    │       │
 │                              ┌──────────────────────────┘    │       │
@@ -98,23 +98,23 @@ flowchart TD
 │                     [backpressure.py]              [dlq_handler.py]  │
 │                     pause/resume partitions        retry → DLQ       │
 │                     REQ-17 to REQ-20                    │            │
-│                              │                           ↓            │
+│                              │                           ↓           │
 │                              ↓                  [Kafka: logs-dlq]    │
-│                      [aggregator.py]            1 partition           │
+│                      [aggregator.py]            1 partition          │
 │                      parse·enrich·window                │            │
-│                              │                          ↓             │
+│                              │                          ↓            │
 │                              ↓                   [DLQViewer]         │
-│                        [PostgreSQL]              dashboard / CLI      │
-│                    5 tables, indexed                                  │
-│                              │                                        │
-│                              ↓                                        │
-│                    [FastAPI :8000]                                    │
-│              /metrics/* + /dlq/messages                               │
-│                              │                                        │
-│                              ↓                                        │
-│                [React Dashboard :5173]                                │
-│          ThroughputChart · ConsumerLagPanel                           │
-│          ErrorRatePanel  · DLQViewer                                  │
+│                        [PostgreSQL]              dashboard / CLI     │
+│                    5 tables, indexed                                 │
+│                              │                                       │
+│                              ↓                                       │
+│                    [FastAPI :8000]                                   │
+│              /metrics/* + /dlq/messages                              │
+│                              │                                       │
+│                              ↓                                       │
+│                [React Dashboard :5173]                               │
+│          ThroughputChart · ConsumerLagPanel                          │
+│          ErrorRatePanel  · DLQViewer                                 │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
