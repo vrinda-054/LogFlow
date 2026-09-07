@@ -1,29 +1,8 @@
 version: "3.9"
 
-# =============================================================================
-# LogFlow — Docker Compose
-#
-# Brings up the full infrastructure with one command:
-#   docker compose up -d
-#
-# Services
-# --------
-#   kafka         — Apache Kafka 3.x in KRaft mode (no Zookeeper)
-#   kafka-init    — One-shot init container that creates the required topics
-#   postgres      — PostgreSQL 15 for processed log storage
-#   producer      — Placeholder (Person 1 — ingestion/)
-#   consumer      — Placeholder (Person 2 — consumers/)
-#   processing    — Placeholder (Person 3 — processing/)
-#   dashboard     — Placeholder (Person 4 — dashboard/)
-#
-# Internal DNS names used by application code:
-#   Kafka broker  → kafka:9092
-#   PostgreSQL    → postgres:5432
-# =============================================================================
-
 x-common-env: &common-env
   KAFKA_BROKER: kafka:9092
-  KAFKA_TOPIC_LOGS: logs
+  KAFKA_TOPIC_LOGS: logs-raw
   KAFKA_TOPIC_DLQ: logs-dlq
   KAFKA_CONSUMER_GROUP: logflow-group
   POSTGRES_HOST: postgres
@@ -36,7 +15,6 @@ x-common-env: &common-env
   VITE_API_BASE_URL: http://localhost:8000
 
 services:
-
   # ---------------------------------------------------------------------------
   # Apache Kafka 3.x — KRaft mode (no Zookeeper)
   # ---------------------------------------------------------------------------
@@ -45,16 +23,16 @@ services:
     container_name: logflow-kafka
     hostname: kafka
     ports:
-      - "9092:9092"   # External (host) access
+      - "9092:29092"   # External (host) access via PLAINTEXT_HOST
       - "9093:9093"   # KRaft controller port
     environment:
       # KRaft — combined broker+controller role
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /var/lib/kafka/data
@@ -66,7 +44,7 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
       interval: 10s
       timeout: 10s
       retries: 10
@@ -74,7 +52,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # Kafka Topic Init — runs once, then exits
-  # Creates: logs (4 partitions) + logs-dlq (1 partition)
+  # Creates: logs-raw (4 partitions) + logs-dlq (1 partition)
   # ---------------------------------------------------------------------------
   kafka-init:
     image: confluentinc/cp-kafka:7.6.1
@@ -87,22 +65,10 @@ services:
       "
       echo '--- Creating Kafka topics ---'
 
-      kafka-topics --bootstrap-server kafka:9092 \
-        --create --if-not-exists \
-        --topic logs \
-        --partitions 4 \
-        --replication-factor 1 \
-        --config retention.ms=86400000 \
-        --config cleanup.policy=delete
-      echo 'Topic [logs] created with 4 partitions.'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic logs-raw --partitions 4 --replication-factor 1 --config retention.ms=86400000 --config cleanup.policy=delete
+      echo 'Topic [logs-raw] created with 4 partitions.'
 
-      kafka-topics --bootstrap-server kafka:9092 \
-        --create --if-not-exists \
-        --topic logs-dlq \
-        --partitions 1 \
-        --replication-factor 1 \
-        --config retention.ms=604800000 \
-        --config cleanup.policy=delete
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic logs-dlq --partitions 1 --replication-factor 1 --config retention.ms=604800000 --config cleanup.policy=delete
       echo 'Topic [logs-dlq] created with 1 partition.'
 
       kafka-topics --bootstrap-server kafka:9092 --list

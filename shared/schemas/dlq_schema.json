@@ -4,7 +4,7 @@
   "title": "DLQEnvelope",
   "description": "Dead Letter Queue envelope schema. When a consumer (consumers/dlq_handler.py) cannot process a message — due to schema violations, parse errors, or repeated processing failures — it wraps the raw message in this envelope and publishes it to the 'logs-dlq' Kafka topic. Person 3's FastAPI (/dlq/messages) reads from this topic/table and exposes it to the React dashboard (Person 4).",
   "type": "object",
-  "required": ["original_message", "failure_reason", "retry_count", "failed_at"],
+  "required": ["original_message", "failure_reason", "retry_count", "failed_at", "retry_history"],
   "additionalProperties": false,
   "properties": {
     "original_message": {
@@ -27,6 +27,21 @@
       "type": "string",
       "format": "date-time",
       "description": "ISO 8601 UTC timestamp of the final failure event — i.e., when the message was placed into the DLQ after exhausting retries."
+    },
+    "retry_history": {
+      "type": "array",
+      "description": "Structured record of each processing attempt.",
+      "items": {
+        "type": "object",
+        "required": ["attempt", "result", "timestamp", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {"type": "integer", "minimum": 1},
+          "result": {"type": "string", "enum": ["success", "failure"]},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "reason": {"type": "string"}
+        }
+      }
     }
   },
   "examples": [
@@ -34,7 +49,15 @@
       "original_message": "{\"timestamp\": \"2025-01-15T12:34:56Z\", \"service\": \"auth-service\", \"severity\": \"ERROR\", \"message\": \"Login failed\"}",
       "failure_reason": "JSON schema validation failed: required field 'trace_id' is missing",
       "retry_count": 0,
-      "failed_at": "2025-01-15T12:35:01.123Z"
+      "failed_at": "2025-01-15T12:35:01.123Z",
+      "retry_history": [
+        {
+          "attempt": 1,
+          "result": "failure",
+          "timestamp": "2025-01-15T12:35:01.123Z",
+          "reason": "JSON schema validation failed: required field 'trace_id' is missing"
+        }
+      ]
     }
   ]
 }
