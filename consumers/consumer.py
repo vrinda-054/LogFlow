@@ -1,165 +1,295 @@
-"""
-consumers/consumer.py — Person 2 (Consumer Layer)
-===================================================
 
-Role
-----
-Implements a Kafka consumer group that reads from the `logs` topic (4 partitions)
-and dispatches valid messages to the aggregation layer (processing/aggregator.py)
-via an internal queue/callback. Invalid messages are routed to the DLQ via
-dlq_handler.py.
+from __future__ import annotations
 
-Three consumer instances are intended to run in parallel within the same consumer
-group (KAFKA_CONSUMER_GROUP), each owning ≈1–2 partitions automatically via
-Kafka's partition assignment protocol (see rebalance_config.py for settings).
-
-Upstream / Downstream Contracts
---------------------------------
-  INPUT  ← Kafka topic `logs` (env: KAFKA_TOPIC_LOGS):
-             Each message must be a UTF-8 JSON string conforming to
-             shared/schemas/log_schema.json.
-             Source: ingestion/producer.py.
-
-  OUTPUT → processing/aggregator.py (direct function call or shared queue):
-             Yields validated dict objects matching log_schema.json structure.
-
-  OUTPUT → consumers/dlq_handler.py (on validation failure or processing error):
-             Calls publish_to_dlq(original_message, failure_reason, retry_count)
-             which envelopes the payload per shared/schemas/dlq_schema.json and
-             publishes to the `logs-dlq` topic.
-
-Backpressure Integration
-------------------------
-  Before committing an offset, consumer.py calls:
-    backpressure.check_backpressure(partition_id)
-  If backpressure is signalled (buffer full / consumer lag too high):
-    backpressure.pause_partition(partition_id)  — stops fetching from that partition
-  The poller loop periodically calls:
-    backpressure.resume_partition(partition_id) — once lag normalises
-  (See backpressure.py for full interface — maps to REQ-17–REQ-20.)
-
-Key Behaviours to Implement
-----------------------------
-  - Consumer group membership with cooperative-sticky rebalance (rebalance_config.py)
-  - JSON schema validation against shared/schemas/log_schema.json
-  - Exactly-once or at-least-once offset commit strategy (configurable)
-  - Graceful shutdown on SIGTERM / KeyboardInterrupt (flush + commit offsets)
-"""
-
-import os
+import argparse
 import json
+import logging
+import os
+import signal
+import time
+from collections import deque
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-# ---------------------------------------------------------------------------
-# TODO (Person 2): implement when building the consumer layer
-# ---------------------------------------------------------------------------
-# from confluent_kafka import Consumer, KafkaError
-# import jsonschema
-# from dlq_handler import publish_to_dlq, retry_with_backoff
-# from backpressure import check_backpressure, pause_partition, resume_partition
-# from rebalance_config import get_consumer_config
+import jsonschema
 
+try:
+    from confluent_kafka import Consumer, TopicPartition
+except ImportError:  # pragma: no cover
+    Consumer = None
+    TopicPartition = None
 
-def get_consumer_config() -> dict:
-    """
-    Build confluent-kafka Consumer config from environment variables.
+try:
+    from .backpressure import check_backpressure, pause_partition, resume_partition
+    from .dlq_handler import retry_with_backoff, classify_failure
+    from .rebalance_config import get_consumer_config, on_assign, on_revoke, get_topic
+except ImportError:
+    from backpressure import check_backpressure, pause_partition, resume_partition
+    from dlq_handler import retry_with_backoff, classify_failure
+    from rebalance_config import get_consumer_config, on_assign, on_revoke, get_topic
 
-    Returns
-    -------
-    dict
-        Config suitable for confluent_kafka.Consumer()
-
-    Raises
-    ------
-    EnvironmentError
-        If required env vars are missing.
-    """
-    broker = os.environ.get("KAFKA_BROKER")
-    group  = os.environ.get("KAFKA_CONSUMER_GROUP", "logflow-group")
-    if not broker:
-        raise EnvironmentError("KAFKA_BROKER not set. See .env.example.")
-    return {
-        "bootstrap.servers": broker,
-        "group.id": group,
-        "auto.offset.reset": "earliest",
-        "enable.auto.commit": False,   # manual commit for at-least-once guarantees
-        # Cooperative-sticky rebalance (see rebalance_config.py)
-        "partition.assignment.strategy": "cooperative-sticky",
-    }
+logger = logging.getLogger(__name__)
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "shared" / "schemas" / "log_schema.json"
+with SCHEMA_PATH.open(encoding="utf-8") as schema_file:
+    LOG_SCHEMA = json.load(schema_file)
 
 
-def on_assign(consumer, partitions) -> None:
-    """
-    Callback invoked when partitions are assigned to this consumer instance.
-    Log assigned partitions; initialise backpressure state for each.
+@dataclass(frozen=True)
+class ConsumerStatus:
+    """Stable dashboard/metrics contract for one consumer process."""
 
-    Parameters
-    ----------
-    consumer    : confluent_kafka.Consumer
-    partitions  : list[confluent_kafka.TopicPartition]
-    """
-    print(f"[consumer] Partitions assigned: {[p.partition for p in partitions]}")
-    # TODO: call backpressure.init_partition(p.partition) for each
-
-
-def on_revoke(consumer, partitions) -> None:
-    """
-    Callback invoked before partitions are revoked (e.g. rebalance).
-    Commit offsets for revoked partitions before losing ownership.
-
-    Parameters
-    ----------
-    consumer    : confluent_kafka.Consumer
-    partitions  : list[confluent_kafka.TopicPartition]
-    """
-    print(f"[consumer] Partitions revoked: {[p.partition for p in partitions]}")
-    # TODO: consumer.commit(offsets=partitions)
+    consumer_id: str
+    status: str
+    assigned_partitions: list[int]
+    processing_rate: float
+    consumer_lag: int
+    last_heartbeat: str
+    backpressure_active: bool
 
 
-def process_message(message_bytes: bytes) -> dict:
-    """
-    Deserialise and validate a raw Kafka message payload.
+@dataclass(frozen=True)
+class PartitionStatus:
+    """Stable per-partition health contract derived from Kafka lag."""
 
-    Parameters
-    ----------
-    message_bytes : bytes
-        Raw UTF-8 encoded JSON payload from the Kafka `logs` topic.
+    partition: int
+    throughput: float
+    current_lag: int
+    assigned_consumer: str
+    health: str
 
-    Returns
-    -------
-    dict
-        Validated log record matching shared/schemas/log_schema.json.
 
-    Raises
-    ------
-    ValueError
-        If the payload cannot be parsed or fails schema validation.
-    """
-    # TODO: implement JSON parse + jsonschema.validate(data, LOG_SCHEMA)
-    raise NotImplementedError("process_message: not yet implemented")
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _configure_logging() -> None:
+    class ConsumerIdFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if not hasattr(record, "consumer_id"):
+                record.consumer_id = os.environ.get("CONSUMER_ID", "system")
+            return True
+
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s consumer_id=%(consumer_id)s %(levelname)s %(message)s",
+    )
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(ConsumerIdFilter())
+
+
+def _log(consumer_id: str, level: int, message: str, *args: Any) -> None:
+    logger.log(level, message, *args, extra={"consumer_id": consumer_id})
+
+
+def process_message(message_bytes: bytes) -> dict[str, Any]:
+    """Decode UTF-8 JSON and validate the exact shared log schema."""
+    try:
+        value = json.loads(message_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(classify_failure(exc)) from exc
+    try:
+        jsonschema.validate(value, LOG_SCHEMA, format_checker=jsonschema.FormatChecker())
+    except jsonschema.ValidationError as exc:
+        raise ValueError(classify_failure(exc)) from exc
+    return value
+
+
+def report_consumer_status(status: ConsumerStatus | dict[str, Any]) -> None:
+    """Write a local status snapshot; Person 3 can replace this with metrics/DB output."""
+    payload = asdict(status) if isinstance(status, ConsumerStatus) else status
+    path = Path(os.environ.get("CONSUMER_STATUS_FILE", "consumer-status.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def report_partition_status(status: PartitionStatus | dict[str, Any]) -> None:
+    """Write one partition snapshot; Person 3 can replace this with metrics output."""
+    payload = asdict(status) if isinstance(status, PartitionStatus) else status
+    path = Path(os.environ.get("PARTITION_STATUS_FILE", "partition-status.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+    existing[str(payload["partition"])] = payload
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(existing, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _partition_lag(consumer: Any, topic_partition: Any) -> int:
+    committed = consumer.committed([topic_partition], timeout=1.0)[0].offset
+    high_water = consumer.get_watermark_offsets(topic_partition, timeout=1.0)[1]
+    if committed < 0:
+        committed = consumer.position([topic_partition])[0].offset
+    return max(0, int(high_water - committed))
+
+
+def _process_record(record: dict[str, Any], delay_ms: int) -> None:
+    """Forward a validated record to Person 3's callable integration point."""
+    if delay_ms:
+        time.sleep(delay_ms / 1000)
+    try:
+        from processing.aggregator import ingest
+        ingest(record)
+    except ImportError:
+        logger.debug("processing.aggregator unavailable; validated record accepted")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="LogFlow Kafka consumer")
+    parser.add_argument("--consumer-id", default=os.environ.get("CONSUMER_ID", "consumer-01"))
+    parser.add_argument("--inject-delay-ms", type=int, default=0)
+    return parser
 
 
 def main() -> None:
-    """
-    Main consumer poll loop.
+    """Run the manual-commit poll loop until SIGTERM or SIGINT."""
+    _configure_logging()
+    args = _build_parser().parse_args()
+    if args.inject_delay_ms < 0:
+        raise SystemExit("--inject-delay-ms must be non-negative")
+    if Consumer is None or TopicPartition is None:
+        raise RuntimeError("confluent-kafka package is not installed")
 
-    Stub flow (to be implemented):
-      1. Build config via get_consumer_config()
-      2. Instantiate confluent_kafka.Consumer
-      3. Subscribe to KAFKA_TOPIC_LOGS with on_assign / on_revoke callbacks
-      4. Poll loop:
-         a. consumer.poll(timeout=1.0)
-         b. Skip EOF / None messages
-         c. Check backpressure → pause_partition if needed
-         d. call process_message(msg.value())
-            → on success: forward to aggregator, commit offset
-            → on ValidationError: dlq_handler.publish_to_dlq(...)
-            → on transient error: dlq_handler.retry_with_backoff(...)
-      5. On shutdown: consumer.close()
-    """
-    print("[consumer] STUB — business logic not yet implemented.")
-    print(f"[consumer] Broker: {os.environ.get('KAFKA_BROKER', '<not set>')}")
-    print(f"[consumer] Topic : {os.environ.get('KAFKA_TOPIC_LOGS', 'logs')}")
-    print(f"[consumer] Group : {os.environ.get('KAFKA_CONSUMER_GROUP', 'logflow-group')}")
+    def _kafka_error_cb(err: Any) -> None:
+        logger.error("Kafka client error: %s", err)
+
+    config = get_consumer_config()
+    config["error_cb"] = _kafka_error_cb
+    consumer = Consumer(config, logger=logging.getLogger("logflow.kafka"))
+    try:
+        consumer.consumer_id = args.consumer_id
+    except AttributeError:
+        pass
+    stopping = False
+
+    def stop(_signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        stopping = True
+        _log(
+            args.consumer_id,
+            logging.INFO,
+            json.dumps({
+                "timestamp": _now(),
+                "event": "consumer_disconnect",
+                "consumer_id": args.consumer_id,
+            }),
+        )
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
+    topic = get_topic()
+    consumer.subscribe(
+        [topic],
+        on_assign=lambda c, p: on_assign(c, p, args.consumer_id),
+        on_revoke=lambda c, p: on_revoke(c, p, args.consumer_id),
+    )
+    _log(args.consumer_id, logging.INFO, "subscription requested topic=%s", topic)
+
+    low_water = int(os.environ.get("BACKPRESSURE_LOW_WATER", "200"))
+    high_water = int(os.environ.get("BACKPRESSURE_HIGH_WATER", "5000"))
+    heartbeat_interval = float(os.environ.get("CONSUMER_HEARTBEAT_INTERVAL_SEC", "10"))
+    max_retries = int(os.environ.get("DLQ_MAX_RETRIES", "3"))
+    paused: set[int] = set()
+    processed: deque[float] = deque()
+    partition_counts: dict[int, deque[float]] = {}
+    last_heartbeat = 0.0
+    _log(args.consumer_id, logging.INFO, "consumer started")
+
+    try:
+        while not stopping:
+            message = consumer.poll(1.0)
+            now = time.time()
+
+            if message is not None and message.error():
+                _log(args.consumer_id, logging.ERROR, "Kafka poll error: %s", message.error())
+
+            elif message is not None:
+                partition = message.partition()
+                topic_partition = TopicPartition(message.topic(), message.partition(), message.offset())
+                lag = _partition_lag(consumer, topic_partition)
+                action = check_backpressure(lag, low_water, high_water)
+
+                if action == "PAUSE" and partition not in paused:
+                    pause_partition(consumer, topic_partition, lag, high_water)
+                    paused.add(partition)
+                elif action == "RESUME" and partition in paused:
+                    resume_partition(consumer, topic_partition, lag, low_water)
+                    paused.discard(partition)
+
+                raw = message.value()
+                raw_text = raw.decode("utf-8", errors="replace")
+                try:
+                    record = process_message(raw)
+                    process_fn = lambda item: _process_record(item, args.inject_delay_ms)
+                    retry_message: dict[str, Any] | str = record
+                except ValueError:
+                    process_fn = lambda _item: process_message(raw)
+                    retry_message = raw_text
+
+                success, _history = retry_with_backoff(
+                    retry_message,
+                    process_fn,
+                    max_retries=max_retries,
+                    base_delay_ms=int(os.environ.get("DLQ_BASE_DELAY_MS", "200")),
+                )
+                consumer.commit(message=message, asynchronous=False)
+
+                if success:
+                    processed.append(now)
+                    partition_times = partition_counts.setdefault(partition, deque())
+                    partition_times.append(now)
+
+            if now - last_heartbeat >= heartbeat_interval:
+                assigned = consumer.assignment()
+                lags = [_partition_lag(consumer, tp) for tp in assigned]
+                while processed and processed[0] <= now - 60:
+                    processed.popleft()
+
+                status = ConsumerStatus(
+                    args.consumer_id,
+                    "PAUSED" if paused else "RUNNING",
+                    [tp.partition for tp in assigned],
+                    len(processed) / 60.0,
+                    sum(lags),
+                    _now(),
+                    bool(paused),
+                )
+                report_consumer_status(status)
+                _log(
+                    args.consumer_id,
+                    logging.INFO,
+                    "heartbeat assigned=%s lag=%s processed_last_60s=%d",
+                    status.assigned_partitions,
+                    status.consumer_lag,
+                    len(processed),
+                )
+
+                for topic_partition, partition_lag in zip(assigned, lags):
+                    partition_times = partition_counts.setdefault(topic_partition.partition, deque())
+                    while partition_times and partition_times[0] <= now - 60:
+                        partition_times.popleft()
+                    throughput = len(partition_times) / 60.0
+                    health = (
+                        "HEALTHY" if partition_lag <= low_water
+                        else "DEGRADED" if partition_lag < high_water
+                        else "UNHEALTHY"
+                    )
+                    report_partition_status(
+                        PartitionStatus(topic_partition.partition, throughput, partition_lag, args.consumer_id, health)
+                    )
+                last_heartbeat = now
+    finally:
+        _log(args.consumer_id, logging.INFO, "consumer disconnecting")
+        consumer.close()
 
 
 if __name__ == "__main__":

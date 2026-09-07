@@ -1,0 +1,1 @@
+{"assigned_partitions": [0, 1, 2, 3], "backpressure_active": false, "consumer_id": "consumer-01", "consumer_lag": 0, "last_heartbeat": "2026-09-07T05:34:25.772+00:00", "processing_rate": 0.0, "status": "RUNNING"}

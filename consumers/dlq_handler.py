@@ -1,166 +1,126 @@
-"""
-consumers/dlq_handler.py — Person 2 (Consumer Layer)
-======================================================
+"""Retries and publishes failed records to the ``logs-dlq`` Kafka topic."""
 
-Role
-----
-Handles failed messages within the consumer layer. When consumer.py cannot
-successfully process a Kafka message (schema violation, parse error, or repeated
-transient failures), it delegates here to either retry the message or publish
-it to the Dead Letter Queue (DLQ).
+from __future__ import annotations
 
-Upstream / Downstream Contracts
---------------------------------
-  CALLED BY ← consumers/consumer.py:
-    - retry_with_backoff(fn, message_bytes, max_retries) — retry a failed handler
-    - publish_to_dlq(original_message, failure_reason, retry_count) — send to DLQ
-
-  OUTPUT → Kafka topic `logs-dlq` (env: KAFKA_TOPIC_DLQ):
-    Each DLQ message is a UTF-8 JSON string conforming to
-    shared/schemas/dlq_schema.json:
-      {
-        "original_message" : <original payload as object or raw string>,
-        "failure_reason"   : <str>,
-        "retry_count"      : <int>,
-        "failed_at"        : <ISO 8601 UTC timestamp>
-      }
-
-  OUTPUT → processing/db/schema.sql (table: dlq_log):
-    Person 3's aggregator also persists DLQ events for the FastAPI
-    /dlq/messages endpoint consumed by the React dashboard (Person 4).
-
-Retry Strategy
---------------
-  Exponential backoff: delay = base_delay * (2 ** attempt)
-  Default: base_delay=0.5s, max_retries=3
-  After max_retries exhausted → publish_to_dlq() is called automatically.
-
-Key Functions (to be implemented)
-----------------------------------
-  retry_with_backoff(fn, message_bytes, max_retries=3) → bool
-  publish_to_dlq(original_message, failure_reason, retry_count) → None
-"""
-
-import os
 import json
+import logging
+import os
 import time
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Any, Callable
 
-# ---------------------------------------------------------------------------
-# TODO (Person 2): initialise a confluent_kafka.Producer for DLQ publishing
-# ---------------------------------------------------------------------------
-# from confluent_kafka import Producer
-# _dlq_producer = None   # initialised lazily in _get_dlq_producer()
+try:
+    from confluent_kafka import Producer
+except ImportError:  # pragma: no cover
+    Producer = None
 
-_DLQ_TOPIC = os.environ.get("KAFKA_TOPIC_DLQ", "logs-dlq")
-
-
-def _get_dlq_producer():
-    """
-    Lazily initialise and return a shared confluent-kafka Producer for the DLQ.
-
-    Returns
-    -------
-    confluent_kafka.Producer
-        Configured to connect to KAFKA_BROKER.
-
-    Notes
-    -----
-    Uses a module-level singleton to avoid creating a new Producer per message.
-    Thread-safety: confluent-kafka Producer is thread-safe for produce() calls.
-    """
-    # TODO: implement singleton Producer init
-    raise NotImplementedError("_get_dlq_producer: not yet implemented")
+logger = logging.getLogger(__name__)
+_producer: Any = None
 
 
-def retry_with_backoff(fn, message_bytes: bytes, max_retries: int = 3) -> bool:
-    """
-    Attempt to call `fn(message_bytes)` up to `max_retries` times with
-    exponential backoff between attempts.
+@dataclass(frozen=True)
+class RetryAttempt:
+    """Typed retry-history item embedded in the DLQ envelope."""
 
-    Parameters
-    ----------
-    fn           : callable
-        The processing function to retry. Signature: fn(bytes) → Any.
-        Expected to be consumer.process_message or a downstream handler.
-    message_bytes: bytes
-        The raw Kafka message payload to reprocess.
-    max_retries  : int
-        Maximum number of retry attempts before giving up (default: 3).
+    attempt: int
+    result: str
+    timestamp: str
+    reason: str
 
-    Returns
-    -------
-    bool
-        True if fn succeeded within max_retries attempts, False otherwise.
 
-    Side Effects
-    ------------
-    If all retries fail, calls publish_to_dlq() with retry_count=max_retries
-    and failure_reason taken from the last exception.
-    """
-    base_delay = 0.5  # seconds
-    last_exc   = None
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
-    for attempt in range(max_retries + 1):
+
+def _get_dlq_producer() -> Any:
+    """Lazily create the Kafka producer used for DLQ messages."""
+    global _producer
+    if _producer is None:
+        if Producer is None:
+            raise RuntimeError("confluent-kafka package is not installed")
+        broker = os.environ.get("KAFKA_BROKER")
+        if not broker:
+            raise EnvironmentError("KAFKA_BROKER not set. See .env.example.")
+        _producer = Producer({"bootstrap.servers": broker, "acks": "all"})
+    return _producer
+
+
+def classify_failure(exception_or_validation_result: Any) -> str:
+    """Map common failures to stable, human-readable reasons."""
+    text = str(exception_or_validation_result)
+    name = type(exception_or_validation_result).__name__.lower()
+    if isinstance(exception_or_validation_result, (json.JSONDecodeError, UnicodeDecodeError)) or "json" in name:
+        return f"Deserialization error: {text}"[:1024]
+    if "validation" in name or "schema" in text.lower() or "required property" in text.lower():
+        return f"JSON schema validation failed: {text}"[:1024]
+    if "deserialization" in text.lower() or "utf-8" in text.lower():
+        return f"Deserialization error: {text}"[:1024]
+    return f"Processing failure: {text}"[:1024]
+
+
+def retry_with_backoff(
+    message: dict[str, Any] | str,
+    process_fn: Callable[[dict[str, Any] | str], None],
+    max_retries: int = 3,
+    base_delay_ms: int = 200,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Process a message, retry failures, and route final failure to the DLQ."""
+    if max_retries < 0 or base_delay_ms < 0:
+        raise ValueError("max_retries and base_delay_ms must be non-negative")
+    history: list[dict[str, Any]] = []
+    last_reason = "Processing failure: unknown error"
+    for attempt in range(1, max_retries + 2):
         try:
-            fn(message_bytes)
-            return True
+            process_fn(message)
+            history.append(asdict(RetryAttempt(attempt, "success", _now(), "")))
+            logger.info(
+                "event=%s",
+                json.dumps({"timestamp": _now(), "event": "retry_attempt", "attempt": attempt, "result": "success"}),
+            )
+            return True, history
         except Exception as exc:
-            last_exc = exc
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                print(f"[dlq_handler] Retry {attempt + 1}/{max_retries} "
-                      f"after {delay:.1f}s — {exc}")
-                time.sleep(delay)
-
-    # All retries exhausted
-    publish_to_dlq(
-        original_message=message_bytes.decode("utf-8", errors="replace"),
-        failure_reason=str(last_exc),
-        retry_count=max_retries,
-    )
-    return False
+            last_reason = classify_failure(exc)
+            history.append(asdict(RetryAttempt(attempt, "failure", _now(), last_reason)))
+            logger.warning(
+                "event=%s",
+                json.dumps({
+                    "timestamp": _now(),
+                    "event": "retry_attempt",
+                    "attempt": attempt,
+                    "result": "failure",
+                    "reason": last_reason,
+                }),
+            )
+            if attempt <= max_retries:
+                time.sleep((base_delay_ms * (2 ** (attempt - 1))) / 1000)
+    publish_to_dlq(message, last_reason, history)
+    return False, history
 
 
 def publish_to_dlq(
-    original_message,
-    failure_reason: str,
-    retry_count: int,
-) -> None:
-    """
-    Wrap the failed message in a DLQ envelope and publish it to the `logs-dlq`
-    Kafka topic.
-
-    Parameters
-    ----------
-    original_message : str | dict
-        The original message payload. Pass as a dict if it was valid JSON,
-        or as a raw string if it could not be parsed.
-    failure_reason   : str
-        Human-readable explanation of the failure (≤1024 chars).
-    retry_count      : int
-        Number of retries attempted before this DLQ publication (≥0).
-
-    Output
-    ------
-    Publishes a single message to Kafka topic `logs-dlq`.
-    The message key is None (DLQ topic has 1 partition; no ordering needed).
-    The message value is a UTF-8 JSON string conforming to dlq_schema.json.
-
-    Raises
-    ------
-    RuntimeError
-        If the Kafka produce call fails after the internal delivery callback
-        reports an error.
-    """
+    message: dict[str, Any] | str, failure_reason: str, retry_history: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Publish a stable DLQ envelope and return it for inspection/tests."""
     envelope = {
-        "original_message": original_message,
-        "failure_reason":   failure_reason[:1024],
-        "retry_count":      retry_count,
-        "failed_at":        datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "original_message": message,
+        "failure_reason": failure_reason[:1024] or "Unknown processing failure",
+        "retry_count": sum(1 for item in retry_history if item.get("result") == "failure"),
+        "failed_at": _now(),
+        "retry_history": retry_history,
     }
-    print(f"[dlq_handler] Publishing to DLQ | reason='{failure_reason[:80]}...' "
-          f"retries={retry_count}")
-    # TODO: producer = _get_dlq_producer()
-    # TODO: producer.produce(_DLQ_TOPIC, value=json.dumps(envelope).encode("utf-8"))
-    # TODO: producer.poll(0)
+    producer = _get_dlq_producer()
+    topic = os.environ.get("KAFKA_TOPIC_DLQ", "logs-dlq")
+    producer.produce(topic, value=json.dumps(envelope).encode("utf-8"))
+    producer.poll(0)
+    logger.error(
+        "event=%s",
+        json.dumps({
+            "timestamp": envelope["failed_at"],
+            "event": "dlq_publish",
+            "topic": topic,
+            "retry_count": envelope["retry_count"],
+            "failure_reason": envelope["failure_reason"],
+        }),
+    )
+    return envelope
