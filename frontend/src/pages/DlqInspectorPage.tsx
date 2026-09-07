@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getDlqMessages, type DlqRecord } from '../api';
+import DashboardShell from '../components/DashboardShell';
 
 type ViewMessage = DlqRecord & {
   service: string;
@@ -69,7 +70,8 @@ export default function DlqInspectorPage() {
     : '0.0';
 
   return (
-    <div className="page-frame dlq-page">
+    <DashboardShell>
+      <div className="page-frame dlq-page">
       <header className="page-header">
         <div>
           <h1>Dead Letter Queue Inspector</h1>
@@ -138,6 +140,7 @@ export default function DlqInspectorPage() {
           </div>
         </aside>
       </div>
-    </div>
+      </div>
+    </DashboardShell>
   );
 }

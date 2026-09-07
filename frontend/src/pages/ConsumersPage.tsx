@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getConsumerLag, getConsumerStatus, type ConsumerLagResponse, type ConsumerStatusResponse } from '../api';
+import DashboardShell from '../components/DashboardShell';
 
 const sampleLag: ConsumerLagResponse = {
   total_lag: 342,
@@ -43,7 +44,8 @@ export default function ConsumersPage() {
   );
 
   return (
-    <div className="page-frame consumer-page">
+    <DashboardShell>
+      <div className="page-frame consumer-page">
       <header className="page-header">
         <div>
           <h1>Consumer &amp; Partition View</h1>
@@ -141,6 +143,7 @@ export default function ConsumersPage() {
           </div>
         </div>
       </section>
-    </div>
+      </div>
+    </DashboardShell>
   );
 }
