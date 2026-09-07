@@ -25,6 +25,34 @@ export type DlqResponse = {
   messages: DlqRecord[];
 };
 
+export type ConsumerStatus = {
+  consumer_id: string;
+  status: string;
+  assigned_partitions: number[];
+  processing_rate: number;
+  consumer_lag: number;
+  last_heartbeat: string;
+  backpressure_active: boolean;
+};
+
+export type PartitionStatus = {
+  partition: number;
+  throughput: number;
+  current_lag: number;
+  assigned_consumer: string;
+  health: string;
+};
+
+export type ConsumerStatusResponse = {
+  consumer: ConsumerStatus;
+  partitions: PartitionStatus[];
+  rebalancing: {
+    state: string;
+    current_assignment: number[];
+    after_recovery: string;
+  };
+};
+
 async function apiFetch<T>(path: string, params: Record<string, string | number> = {}): Promise<T> {
   const url = new URL(path, API_BASE_URL);
   Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, String(value)));
@@ -47,4 +75,8 @@ export function getConsumerLag(): Promise<ConsumerLagResponse> {
 
 export function getDlqMessages(limit = 50, offset = 0): Promise<DlqResponse> {
   return apiFetch<DlqResponse>('/dlq/messages', { limit, offset });
+}
+
+export function getConsumerStatus(): Promise<ConsumerStatusResponse> {
+  return apiFetch<ConsumerStatusResponse>('/metrics/consumers');
 }

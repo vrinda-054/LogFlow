@@ -56,6 +56,8 @@ Consumed by
 
 import os
 import logging
+import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Query, HTTPException
@@ -68,6 +70,7 @@ except ImportError:  # pragma: no cover - fallback for direct script execution
     from db.connection import get_session, get_engine
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 app = FastAPI(
     title="LogFlow Metrics API",
@@ -227,6 +230,38 @@ def get_consumer_lag(
         total_lag = sum(p["lag"] for p in partitions)
 
     return {"total_lag": total_lag, "partitions": partitions}
+
+
+def _read_status_file(environment_name: str, default_name: str):
+    path = Path(os.environ.get(environment_name, PROJECT_ROOT / default_name))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Consumer telemetry is unavailable: {path.name} has not been written yet",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Consumer telemetry is unavailable: {path.name} is invalid",
+        ) from exc
+
+
+@app.get("/metrics/consumers", tags=["metrics"])
+def get_consumer_status():
+    """Return the latest Person 2 consumer and partition telemetry snapshots."""
+    consumer = _read_status_file("CONSUMER_STATUS_FILE", "consumer-status.json")
+    partitions = _read_status_file("PARTITION_STATUS_FILE", "partition-status.json")
+    return {
+        "consumer": consumer,
+        "partitions": list(partitions.values()),
+        "rebalancing": {
+            "state": "BACKPRESSURE" if consumer.get("backpressure_active") else "STABLE",
+            "current_assignment": consumer.get("assigned_partitions", []),
+            "after_recovery": "AUTOMATIC_REBALANCE",
+        },
+    }
 
 
 @app.get("/metrics/errors", tags=["metrics"])

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getConsumerLag, type ConsumerLagResponse } from '../api';
+import { getConsumerLag, getConsumerStatus, type ConsumerLagResponse, type ConsumerStatusResponse } from '../api';
 
 const sampleLag: ConsumerLagResponse = {
   total_lag: 342,
@@ -16,11 +16,13 @@ export default function ConsumersPage() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedPartition, setSelectedPartition] = useState(0);
+  const [consumerStatus, setConsumerStatus] = useState<ConsumerStatusResponse | null>(null);
 
   const refresh = async () => {
     try {
-      const next = await getConsumerLag();
+      const [next, status] = await Promise.all([getConsumerLag(), getConsumerStatus()]);
       setData(next);
+      setConsumerStatus(status);
       setLastUpdated(new Date());
       setError(null);
     } catch (requestError) {
@@ -57,14 +59,31 @@ export default function ConsumersPage() {
       {error && <div className="error-banner" role="alert">Consumer API unavailable: {error}</div>}
 
       <div className="summary-row">
-        <div className="summary-box active">Active Consumers <strong>3 / 3</strong><span>HEALTHY</span></div>
+       <div className={`summary-box ${consumerStatus?.consumer.status === 'RUNNING' ? 'active' : 'warning'}`}>Consumer Instance <strong>{consumerStatus?.consumer.consumer_id ?? '—'}</strong><span>{consumerStatus?.consumer.status ?? 'TELEMETRY UNAVAILABLE'}</span></div>
         <div className="summary-box">Total Partitions <strong>{data.partitions.length}</strong><span>ASSIGNED</span></div>
-        <div className="summary-box">Total Throughput <strong>2,184 msg/s</strong><span>HEALTHY</span></div>
+       <div className="summary-box">Processing Rate <strong>{consumerStatus ? `${consumerStatus.consumer.processing_rate.toFixed(1)} msg/s` : '—'}</strong><span>LIVE HEARTBEAT</span></div>
         <div className={`summary-box ${data.total_lag > 1500 ? 'warning' : ''}`}>Messages Behind <strong>{data.total_lag.toLocaleString()}</strong><span>{data.total_lag > 1500 ? 'WARNING' : 'HEALTHY'}</span></div>
       </div>
 
+      <section className="panel full-panel">
+       <div className="panel-title-row"><span>Consumer Instances</span><span className="status-tag info">{consumerStatus?.consumer.last_heartbeat ? `HEARTBEAT ${new Date(consumerStatus.consumer.last_heartbeat).toLocaleTimeString()}` : 'WAITING'}</span></div>
+       <div className="three-cards">
+         {consumerStatus ? (
+           <div className="consumer-card selected">
+             <div className="health-header"><span>{consumerStatus.consumer.consumer_id}</span><span className={`status-tag ${consumerStatus.consumer.status === 'RUNNING' ? 'running' : 'danger'}`}>{consumerStatus.consumer.status}</span></div>
+             <div className="consumer-body">
+               <div><label>Processing rate</label><strong>{consumerStatus.consumer.processing_rate.toFixed(1)} msg/s</strong></div>
+               <div><label>Consumer lag</label><strong>{consumerStatus.consumer.consumer_lag.toLocaleString()}</strong></div>
+               <div><label>Assigned partitions</label><strong>{consumerStatus.consumer.assigned_partitions.map((partition) => `P${partition}`).join(', ') || 'None'}</strong></div>
+               <div><label>Backpressure</label><strong>{consumerStatus.consumer.backpressure_active ? 'ACTIVE' : 'CLEAR'}</strong></div>
+             </div>
+           </div>
+         ) : <div className="empty-state">Waiting for a consumer heartbeat snapshot</div>}
+       </div>
+      </section>
+
       <section className="panel table-panel">
-        <div className="panel-title-row"><span>Kafka Partition Assignment</span><span className="status-tag info">logs</span></div>
+       <div className="panel-title-row"><span>Kafka Partition Assignment</span><span className="status-tag info">logs</span></div>
         <table className="partition-table">
           <thead><tr><th>PART</th><th>THROUGHPUT</th><th>CURRENT LAG</th><th>CONSUMER</th></tr></thead>
           <tbody>
@@ -74,9 +93,9 @@ export default function ConsumersPage() {
               return (
                 <tr key={partitionId} className={selectedPartition === partitionId ? 'selected-row' : ''} onClick={() => setSelectedPartition(partitionId)}>
                   <td>P{partitionId}</td>
-                  <td>{600 + partitionId * 50} msg/s</td>
-                  <td className={lag > 1500 ? 'danger-text' : ''}>Lag {lag.toLocaleString()}</td>
-                  <td>{partition?.consumer_id ?? 'Unassigned'}</td>
+                  <td>{consumerStatus?.partitions.find((item) => item.partition === partitionId)?.throughput.toFixed(1) ?? '—'} msg/s</td>
+                  <td className={lag > 1500 ? 'danger-text' : ''}>Lag {(consumerStatus?.partitions.find((item) => item.partition === partitionId)?.current_lag ?? lag).toLocaleString()}</td>
+                  <td>{consumerStatus?.partitions.find((item) => item.partition === partitionId)?.assigned_consumer ?? partition?.consumer_id ?? 'Unassigned'}</td>
                 </tr>
               );
             })}
@@ -110,6 +129,18 @@ export default function ConsumersPage() {
           </ul>
         </section>
       </div>
+
+      <section className="rebalancing-panel panel">
+        <div className="panel-title-row"><span>Rebalancing State</span><span className="status-tag info">COOPERATIVE-STICKY</span></div>
+        <div className="rebalance-body">
+          <div className="rebalance-status red">{consumerStatus?.rebalancing.state ?? 'WAITING FOR TELEMETRY'}</div>
+          <div className="rebalance-status blue">After Recovery: {consumerStatus?.rebalancing.after_recovery ?? 'AUTOMATIC_REBALANCE'}</div>
+          <div className="rebalance-legend">
+            <span>Current assignment: {consumerStatus?.rebalancing.current_assignment.map((partition) => `P${partition}`).join(', ') || 'None'}</span>
+            <span>Partitions are reassigned automatically after a worker restart</span>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
