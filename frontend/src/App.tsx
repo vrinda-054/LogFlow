@@ -5,6 +5,7 @@ import ConsumersPage from './pages/ConsumersPage';
 import DlqInspectorPage from './pages/DlqInspectorPage';
 import LiveLogsPage from './pages/LiveLogsPage';
 import OverviewPage from './pages/OverviewPage';
+import TestScenariosPage from './pages/TestScenariosPage';
 
 type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
 type LogEntry = {
@@ -664,7 +665,7 @@ function App() {
       <Route path="/consumers" element={<ConsumersPage />} />
       <Route path="/dlq" element={<DlqInspectorPage />} />
       <Route path="/logs" element={<LiveLogsPage />} />
-      <Route path="/scenarios" element={<ScenariosPage />} />
+      <Route path="/scenarios" element={<TestScenariosPage />} />
     </Routes>
   );
 }
