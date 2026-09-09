@@ -275,6 +275,25 @@ button { cursor: pointer; }
 .mini-stat { background: rgba(13,23,36,0.85); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
 .mini-stat strong { font-size: 2rem; }
 .mini-stat span { color: var(--muted); font-size: 0.62rem; letter-spacing: 0.1rem; }
+.live-stats { grid-template-columns: repeat(5, minmax(0,1fr)); }
+.live-stats .mini-stat strong { color: #edf6ff; }
+.live-stats .danger-stat strong, .danger-text { color: #ff4d5d !important; }
+.live-stats .live-stat strong, .live-text { color: var(--green) !important; }
+.live-stats small { color: var(--green); font-size: .62rem; }
+.live-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: auto; padding: 10px 12px; margin-bottom: 0; border-radius: 8px 8px 0 0; }
+.live-toolbar input { flex: 1; min-width: 220px; background: rgba(255,255,255,0.04); border: 1px solid var(--line); color: #dfeaf7; padding: 8px 12px; border-radius: 6px; }
+.live-toolbar select { background: rgba(255,255,255,0.04); border: 1px solid var(--line); color: #dfeaf7; padding: 8px 10px; border-radius: 6px; }
+.selected-filter { color: var(--cyan); border-color: rgba(112,211,255,.45); }
+.live-header-meta { color: var(--muted); font-size: .62rem; }
+.live-log-content { gap: 0; }
+.live-log-table th, .live-log-table td { padding: 11px 9px; font-size: .67rem; }
+.live-log-table tr { cursor: pointer; }
+.live-log-table .error-row td:first-child { border-left: 2px solid #ff4d5d; }
+.service-badge { padding: 3px 7px; border-radius: 3px; background: rgba(64, 205, 129, .16); color: #4ee6a0; font-size: .55rem; }
+.live-log-footer { padding-top: 12px; color: var(--muted); font-size: .63rem; }
+.live-log-footer strong { color: var(--green); }
+.selected-message { color: #edf6ff; font-size: .72rem; margin: 0; }
+.copy-button { float: right; padding: 4px 8px; color: var(--green); }
 
 .scenario-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(13,23,36,0.76); }
 .scenario-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; }

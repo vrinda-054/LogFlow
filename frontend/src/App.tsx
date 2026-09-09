@@ -3,6 +3,7 @@ import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import DashboardShell from './components/DashboardShell';
 import ConsumersPage from './pages/ConsumersPage';
 import DlqInspectorPage from './pages/DlqInspectorPage';
+import LiveLogsPage from './pages/LiveLogsPage';
 import OverviewPage from './pages/OverviewPage';
 
 type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
@@ -662,7 +663,7 @@ function App() {
       <Route path="/" element={<OverviewPage />} />
       <Route path="/consumers" element={<ConsumersPage />} />
       <Route path="/dlq" element={<DlqInspectorPage />} />
-      <Route path="/logs" element={<LogsPage />} />
+      <Route path="/logs" element={<LiveLogsPage />} />
       <Route path="/scenarios" element={<ScenariosPage />} />
     </Routes>
   );
