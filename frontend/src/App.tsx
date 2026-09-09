@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import DashboardShell from './components/DashboardShell';
 import ConsumersPage from './pages/ConsumersPage';
 import DlqInspectorPage from './pages/DlqInspectorPage';
+import OverviewPage from './pages/OverviewPage';
 
 type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
 type LogEntry = {
@@ -120,7 +122,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function OverviewPage() {
+function LegacyOverviewPage() {
   const navigate = useNavigate();
   const [metrics, setMetrics] = useState(initialBaseMetrics);
 
@@ -136,7 +138,7 @@ function OverviewPage() {
   };
 
   return (
-    <AppShell>
+    <DashboardShell>
       <div className="page-frame overview-page">
         <header className="page-header">
           <div>
@@ -248,7 +250,7 @@ function OverviewPage() {
           ))}
         </div>
       </div>
-    </AppShell>
+    </DashboardShell>
   );
 }
 
