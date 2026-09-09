@@ -129,12 +129,38 @@ services:
       <<: *common-env
 
   # ---------------------------------------------------------------------------
-  # Placeholder service — Person 2 (consumers/)
+  # Person 2 — consumers/
   # ---------------------------------------------------------------------------
-  consumer:
-    image: busybox
-    container_name: logflow-consumer
-    command: ["sh", "-c", "echo '[placeholder] consumer not yet implemented' && sleep infinity"]
+  consumer-1:
+    build:
+      context: .
+      dockerfile: consumers/Dockerfile
+    container_name: logflow-consumer-1
+    command: ["--consumer-id", "consumer-01"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+
+  consumer-2:
+    build:
+      context: .
+      dockerfile: consumers/Dockerfile
+    container_name: logflow-consumer-2
+    command: ["--consumer-id", "consumer-02"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+
+  consumer-3:
+    build:
+      context: .
+      dockerfile: consumers/Dockerfile
+    container_name: logflow-consumer-3
+    command: ["--consumer-id", "consumer-03"]
     depends_on:
       kafka-init:
         condition: service_completed_successfully

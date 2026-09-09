@@ -16,18 +16,19 @@ from typing import Any
 import jsonschema
 
 try:
-    from confluent_kafka import Consumer, TopicPartition
+    from confluent_kafka import Consumer, KafkaException, TopicPartition
 except ImportError:  # pragma: no cover
     Consumer = None
+    KafkaException = Exception
     TopicPartition = None
 
 try:
     from .backpressure import check_backpressure, pause_partition, resume_partition
-    from .dlq_handler import retry_with_backoff, classify_failure
+    from .dlq_handler import retry_with_backoff, classify_failure, publish_to_dlq
     from .rebalance_config import get_consumer_config, on_assign, on_revoke, get_topic
 except ImportError:
     from backpressure import check_backpressure, pause_partition, resume_partition
-    from dlq_handler import retry_with_backoff, classify_failure
+    from dlq_handler import retry_with_backoff, classify_failure, publish_to_dlq
     from rebalance_config import get_consumer_config, on_assign, on_revoke, get_topic
 
 logger = logging.getLogger(__name__)
@@ -124,11 +125,20 @@ def report_partition_status(status: PartitionStatus | dict[str, Any]) -> None:
 
 
 def _partition_lag(consumer: Any, topic_partition: Any) -> int:
-    committed = consumer.committed([topic_partition], timeout=1.0)[0].offset
-    high_water = consumer.get_watermark_offsets(topic_partition, timeout=1.0)[1]
-    if committed < 0:
-        committed = consumer.position([topic_partition])[0].offset
-    return max(0, int(high_water - committed))
+    try:
+        committed = consumer.committed([topic_partition], timeout=1.0)[0].offset
+        high_water = consumer.get_watermark_offsets(topic_partition, timeout=1.0)[1]
+        if committed < 0:
+            committed = consumer.position([topic_partition])[0].offset
+        return max(0, int(high_water - committed))
+    except KafkaException as exc:
+        _log(
+            str(getattr(consumer, "consumer_id", "unknown")),
+            logging.WARNING,
+            "lag sample unavailable during rebalance: %s",
+            exc,
+        )
+        return 0
 
 
 def _process_record(record: dict[str, Any], delay_ms: int) -> None:
@@ -230,17 +240,25 @@ def main() -> None:
                 try:
                     record = process_message(raw)
                     process_fn = lambda item: _process_record(item, args.inject_delay_ms)
-                    retry_message: dict[str, Any] | str = record
-                except ValueError:
-                    process_fn = lambda _item: process_message(raw)
-                    retry_message = raw_text
-
-                success, _history = retry_with_backoff(
-                    retry_message,
-                    process_fn,
-                    max_retries=max_retries,
-                    base_delay_ms=int(os.environ.get("DLQ_BASE_DELAY_MS", "200")),
-                )
+                    success, _history = retry_with_backoff(
+                        record,
+                        process_fn,
+                        max_retries=max_retries,
+                        base_delay_ms=int(os.environ.get("DLQ_BASE_DELAY_MS", "200")),
+                    )
+                except ValueError as exc:
+                    failure_reason = classify_failure(exc)
+                    publish_to_dlq(
+                        raw_text,
+                        failure_reason,
+                        [{
+                            "attempt": 1,
+                            "result": "immediate_failure",
+                            "timestamp": _now(),
+                            "reason": failure_reason,
+                        }],
+                    )
+                    success = False
                 consumer.commit(message=message, asynchronous=False)
 
                 if success:

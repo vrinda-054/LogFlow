@@ -24,34 +24,27 @@ remaining consumers — all without operator intervention.
 
 ## Steps
 
-1. Start 3 consumer instances (Person 2):
+1. Start and inspect the three named Compose consumer instances:
    ```bash
-   # Terminal 1 — consumer A
-   python consumers/consumer.py
-
-   # Terminal 2 — consumer B (will be killed)
-   python consumers/consumer.py
-
-   # Terminal 3 — consumer C
-   python consumers/consumer.py
+   docker compose up -d kafka postgres kafka-init consumer-1 consumer-2 consumer-3
+   docker exec logflow-kafka kafka-consumer-groups \
+     --bootstrap-server localhost:9092 --describe --group logflow-group
    ```
 
 2. Start producer at steady rate (Person 1):
    ```bash
-   cd ingestion && python producer.py --rate 15 --duration 300 --scenario normal
+   python tests/manual_test_consumer.py
    ```
 
-3. After 60 seconds of steady operation, kill Consumer B hard:
+3. Stop Consumer 2 independently:
    ```bash
-   # In a new terminal — find Consumer B's PID and kill it
-   # Linux/Mac:  kill -9 <pid>
-   # Windows:    taskkill /PID <pid> /F
+   docker compose stop consumer-2
    ```
 
 4. Observe rebalance in Consumers A and C logs:
    ```
-   [consumer] Partitions revoked: [...]
-   [consumer] Partitions assigned: [...]
+   event={"event": "partition_revoked", ...}
+   event={"event": "partition_assigned", ...}
    ```
 
 5. Check that Kafka consumer group still shows all 4 partitions owned:
@@ -63,9 +56,9 @@ remaining consumers — all without operator intervention.
 
 6. After 120 more seconds (Consumer B has been dead for 2 min), check for message loss.
 
-7. Restart Consumer B (simulating auto-restart / Kubernetes pod restart):
+7. Restart Consumer 2:
    ```bash
-   python consumers/consumer.py
+   docker compose start consumer-2
    ```
 
 8. Verify second rebalance redistributes partitions across all 3 consumers again.
@@ -90,7 +83,7 @@ remaining consumers — all without operator intervention.
 ## How to Verify
 
 - [ ] `on_assign` and `on_revoke` callbacks are logged during rebalance
-- [ ] After kill, `kafka-consumer-groups --describe` shows only 2 members
+- [ ] After stop and session-timeout expiry, `kafka-consumer-groups --describe` shows only 2 members
   but all 4 partitions still assigned
 - [ ] No gap in `processed_logs` timestamps > session.timeout.ms (30s):
   ```sql

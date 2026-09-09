@@ -27,22 +27,25 @@ processing once the bottleneck clears.
 
 ## Steps
 
-1. Start 3 consumer instances (Person 2) — one will be throttled:
+1. Start the full stack, then replace consumer 3 with a delayed instance:
    ```bash
-   # Terminal 1 (normal)
-   python consumers/consumer.py
-
-   # Terminal 2 (normal)
-   python consumers/consumer.py
-
-   # Terminal 3 (slow — Person 2 must add a --slow-mode flag or sleep injection)
-   python consumers/consumer.py --slow-mode  # add 2s sleep per message
+  docker compose up -d kafka postgres kafka-init consumer-1 consumer-2 consumer-3
+  docker compose stop consumer-3
+  docker compose run -d --name logflow-consumer-3-slow \
+    -e BACKPRESSURE_HIGH_WATER=50 \
+    -e BACKPRESSURE_LOW_WATER=10 \
+    consumer-3 --consumer-id consumer-03 --inject-delay-ms 2000
    ```
 
 2. Start the producer at normal rate (Person 1):
    ```bash
-   cd ingestion && python producer.py --rate 20 --duration 180 --scenario normal
+  python tests/manual_test_consumer.py
    ```
+
+  For a 200-message burst, run the following from the project root:
+  ```bash
+  python -c "from confluent_kafka import Producer; import json, uuid; from datetime import datetime, timezone; p=Producer({'bootstrap.servers':'localhost:9092'}); [p.produce('logs-raw', value=json.dumps({'timestamp':datetime.now(timezone.utc).isoformat(),'service':'slow-test','severity':'INFO','message':str(i),'trace_id':uuid.uuid4().hex}).encode()) for i in range(200)]; p.flush()"
+  ```
 
 3. Monitor partition lag every 5 seconds:
    ```bash
@@ -51,9 +54,11 @@ processing once the bottleneck clears.
      --group logflow-group --describe'
    ```
 
-4. After 90 seconds, "fix" the slow consumer (Ctrl+C in Terminal 3, restart normally):
+4. After the lag has crossed the high-water mark, remove the delayed instance
+  and restart the normal service:
    ```bash
-   python consumers/consumer.py
+  docker rm -f logflow-consumer-3-slow
+  docker compose start consumer-3
    ```
 
 5. Observe lag recovery and partition resumption in logs.
@@ -75,8 +80,8 @@ processing once the bottleneck clears.
 
 ## How to Verify
 
-- [ ] PAUSE log line appears on the slow partition (REQ-18 / REQ-20)
-- [ ] RESUME log line appears after the consumer is restarted (REQ-19 / REQ-20)
+- [ ] `event={"action": "PAUSE", ...}` appears on the slow partition (REQ-18 / REQ-20)
+- [ ] `event={"action": "RESUME", ...}` appears after lag falls below the low-water mark (REQ-19 / REQ-20)
 - [ ] Lag on the slow partition never exceeds 2× BACKPRESSURE_HIGH_WATER
   (backpressure prevents runaway growth)
 - [ ] `GET /metrics/lag` shows lag trajectory (rise then drain) in PostgreSQL:
