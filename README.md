@@ -17,7 +17,7 @@ flowchart TD
     end
 
     subgraph kafka["Kafka KRaft (no Zookeeper)"]
-        B["Topic: logs\n4 partitions\nretention: 24h"]
+        B["Topic: logs-raw\n4 partitions\nretention: 24h"]
         DLQ_TOPIC["Topic: logs-dlq\n1 partition\nretention: 7d"]
     end
 
@@ -89,7 +89,7 @@ flowchart TD
 ┌──────────────────────────────────────────────────────────────────────┐
 │                          LogFlow Pipeline                            │
 │                                                                      │
-│  [Log Generator]──→[Kafka: logs (4 partitions)]──→[Consumer Group]   │
+│  [Log Generator]──→[Kafka: logs-raw (4 partitions)]──→[Consumer Group]│
 │    producer.py          KRaft, no ZK               3 × consumer.py   │
 │    --scenario                                      rebalance_config  │
 │                                                         │    │       │
@@ -166,15 +166,16 @@ docker compose up -d
 
 This starts:
 - **Kafka** (KRaft mode, port 9092)
-- **kafka-init** (creates `logs` topic with 4 partitions + `logs-dlq` with 1)
+- **kafka-init** (creates `logs-raw` topic with 4 partitions + `logs-dlq` with 1)
 - **PostgreSQL** (port 5432, schema auto-applied from `processing/db/schema.sql`)
-- Placeholder containers for producer, consumer, processing, dashboard
+- Placeholder containers for producer and dashboard
+- Consumer group containers, FastAPI (`processing`), and the processing worker
 
 Verify Kafka topics:
 ```bash
 docker exec logflow-kafka kafka-topics \
   --bootstrap-server localhost:9092 --list
-# Expected: logs  logs-dlq
+# Expected: logs-raw  logs-dlq
 ```
 
 Verify PostgreSQL tables:

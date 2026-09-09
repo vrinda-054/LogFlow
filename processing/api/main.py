@@ -233,7 +233,25 @@ def get_consumer_lag(
 
 
 def _read_status_file(environment_name: str, default_name: str):
-    path = Path(os.environ.get(environment_name, PROJECT_ROOT / default_name))
+    directory_name = environment_name.replace("_FILE", "_DIR")
+    configured_directory = os.environ.get(directory_name)
+    if configured_directory:
+        path = Path(configured_directory)
+    else:
+        path = Path(os.environ.get(environment_name, PROJECT_ROOT / default_name))
+    if path.is_dir():
+        snapshots = []
+        for snapshot_path in sorted(path.glob("*.json")):
+            try:
+                snapshots.append(json.loads(snapshot_path.read_text(encoding="utf-8")))
+            except json.JSONDecodeError as exc:
+                logger.warning("Ignoring invalid telemetry snapshot %s: %s", snapshot_path, exc)
+        if snapshots:
+            return snapshots
+        raise HTTPException(
+            status_code=503,
+            detail=f"Consumer telemetry is unavailable: {path} has no snapshots yet",
+        )
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -253,9 +271,23 @@ def get_consumer_status():
     """Return the latest Person 2 consumer and partition telemetry snapshots."""
     consumer = _read_status_file("CONSUMER_STATUS_FILE", "consumer-status.json")
     partitions = _read_status_file("PARTITION_STATUS_FILE", "partition-status.json")
+    if isinstance(consumer, list):
+        active_assignments = {
+            (item.get("consumer_id"), partition)
+            for item in consumer
+            for partition in item.get("assigned_partitions", [])
+        }
+        partitions = [
+            item
+            for item in partitions
+            if (item.get("assigned_consumer"), item.get("partition")) in active_assignments
+        ]
+        consumer = max(consumer, key=lambda item: item.get("last_heartbeat", ""))
+    if isinstance(partitions, dict):
+        partitions = list(partitions.values())
     return {
         "consumer": consumer,
-        "partitions": list(partitions.values()),
+        "partitions": partitions,
         "rebalancing": {
             "state": "BACKPRESSURE" if consumer.get("backpressure_active") else "STABLE",
             "current_assignment": consumer.get("assigned_partitions", []),

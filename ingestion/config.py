@@ -20,10 +20,10 @@ def load_config() -> IngestionConfig:
     
     Defaults:
       KAFKA_BROKER: localhost:9092
-      KAFKA_TOPIC_LOGS: logs
+      KAFKA_TOPIC_LOGS: logs-raw
     """
     kafka_broker = os.environ.get("KAFKA_BROKER", "localhost:9092")
-    kafka_topic_logs = os.environ.get("KAFKA_TOPIC_LOGS", "logs")
+    kafka_topic_logs = os.environ.get("KAFKA_TOPIC_LOGS", "logs-raw")
     return IngestionConfig(
         kafka_broker=kafka_broker,
         kafka_topic_logs=kafka_topic_logs,

@@ -16,7 +16,7 @@ without message loss, consumer lag build-up, or DLQ entries.
 
 - `docker compose up -d` completed successfully
 - `kafka-init` container exited with code 0 (topics created)
-- All four partitions of the `logs` topic confirmed: `docker exec logflow-kafka kafka-topics --bootstrap-server localhost:9092 --describe --topic logs`
+- All four partitions of the `logs-raw` topic confirmed: `docker exec logflow-kafka kafka-topics --bootstrap-server localhost:9092 --describe --topic logs-raw`
 - PostgreSQL schema applied (check: `docker exec logflow-postgres psql -U logflow_user -d logflow -c "\dt logflow.*"`)
 
 ---

@@ -13,6 +13,10 @@ x-common-env: &common-env
   DATABASE_URL: postgresql://logflow_user:changeme@postgres:5432/logflow
   FASTAPI_PORT: "8000"
   VITE_API_BASE_URL: http://localhost:8000
+  CONSUMER_STATUS_FILE: /run/logflow-status/consumer-status.json
+  PARTITION_STATUS_FILE: /run/logflow-status/partition-status.json
+  CONSUMER_STATUS_DIR: /run/logflow-status/consumers
+  PARTITION_STATUS_DIR: /run/logflow-status/partitions
 
 services:
   # ---------------------------------------------------------------------------
@@ -142,6 +146,8 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *common-env
+    volumes:
+      - consumer-status:/run/logflow-status
 
   consumer-2:
     build:
@@ -154,6 +160,8 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *common-env
+    volumes:
+      - consumer-status:/run/logflow-status
 
   consumer-3:
     build:
@@ -166,6 +174,8 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *common-env
+    volumes:
+      - consumer-status:/run/logflow-status
 
   # ---------------------------------------------------------------------------
   # Person 3 — processing/
@@ -185,7 +195,31 @@ services:
     environment:
       <<: *common-env
       PYTHONPATH: /app
+    volumes:
+      - consumer-status:/run/logflow-status
     command: ["python", "-m", "processing.api.main"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  processing-worker:
+    build:
+      context: .
+      dockerfile: processing/Dockerfile
+    container_name: logflow-processing-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      PYTHONPATH: /app
+      AGGREGATOR_AUTO_OFFSET_RESET: earliest
+    command: ["python", "-m", "processing.aggregator"]
 
   # ---------------------------------------------------------------------------
   # Placeholder service — Person 4 (dashboard/)
@@ -202,3 +236,4 @@ services:
 volumes:
   kafka-data:
   postgres-data:
+  consumer-status:

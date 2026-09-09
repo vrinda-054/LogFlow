@@ -100,7 +100,11 @@ def process_message(message_bytes: bytes) -> dict[str, Any]:
 def report_consumer_status(status: ConsumerStatus | dict[str, Any]) -> None:
     """Write a local status snapshot; Person 3 can replace this with metrics/DB output."""
     payload = asdict(status) if isinstance(status, ConsumerStatus) else status
-    path = Path(os.environ.get("CONSUMER_STATUS_FILE", "consumer-status.json"))
+    status_dir = os.environ.get("CONSUMER_STATUS_DIR")
+    if status_dir:
+        path = Path(status_dir) / f"{payload['consumer_id']}.json"
+    else:
+        path = Path(os.environ.get("CONSUMER_STATUS_FILE", "consumer-status.json"))
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -110,8 +114,20 @@ def report_consumer_status(status: ConsumerStatus | dict[str, Any]) -> None:
 def report_partition_status(status: PartitionStatus | dict[str, Any]) -> None:
     """Write one partition snapshot; Person 3 can replace this with metrics output."""
     payload = asdict(status) if isinstance(status, PartitionStatus) else status
-    path = Path(os.environ.get("PARTITION_STATUS_FILE", "partition-status.json"))
+    status_dir = os.environ.get("PARTITION_STATUS_DIR")
+    if status_dir:
+        path = (
+            Path(status_dir)
+            / f"partition-{payload['partition']}-{payload['assigned_consumer']}.json"
+        )
+    else:
+        path = Path(os.environ.get("PARTITION_STATUS_FILE", "partition-status.json"))
     path.parent.mkdir(parents=True, exist_ok=True)
+    if status_dir:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+        return
     existing: dict[str, Any] = {}
     if path.exists():
         try:
@@ -129,7 +145,11 @@ def _partition_lag(consumer: Any, topic_partition: Any) -> int:
         committed = consumer.committed([topic_partition], timeout=1.0)[0].offset
         high_water = consumer.get_watermark_offsets(topic_partition, timeout=1.0)[1]
         if committed < 0:
-            committed = consumer.position([topic_partition])[0].offset
+            position = consumer.position([topic_partition])[0].offset
+            # A newly assigned empty partition can report no committed or
+            # local position; that means its lag is zero, not the sentinel
+            # offset returned by librdkafka.
+            committed = position if position >= 0 else high_water
         return max(0, int(high_water - committed))
     except KafkaException as exc:
         _log(

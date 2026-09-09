@@ -59,8 +59,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from confluent_kafka import Consumer, KafkaException
-from confluent_kafka.admin import AdminClient, ListConsumerGroupOffsetsRequest
 from confluent_kafka import TopicPartition
+import jsonschema
 
 try:
     from processing.db.connection import get_connection
@@ -79,7 +79,7 @@ logging.basicConfig(
 WINDOW_SECONDS = int(os.environ.get("AGGREGATION_WINDOW_SECONDS", "60"))
 LAG_POLL_SECONDS = int(os.environ.get("LAG_POLL_SECONDS", "30"))
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "localhost:9092")
-KAFKA_TOPIC_LOGS = os.environ.get("KAFKA_TOPIC_LOGS", "logs")
+KAFKA_TOPIC_LOGS = os.environ.get("KAFKA_TOPIC_LOGS", "logs-raw")
 KAFKA_TOPIC_DLQ = os.environ.get("KAFKA_TOPIC_DLQ", "logs-dlq")
 KAFKA_CONSUMER_GROUP = os.environ.get("KAFKA_CONSUMER_GROUP", "logflow-group")
 
@@ -90,6 +90,15 @@ AGGREGATOR_GROUP = "logflow-aggregator"
 
 # Severity levels that count towards the error rate metric.
 ERROR_SEVERITIES = {"ERROR", "CRITICAL"}
+
+SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "shared",
+    "schemas",
+    "log_schema.json",
+)
+with open(SCHEMA_PATH, encoding="utf-8") as schema_file:
+    LOG_SCHEMA = json.load(schema_file)
 
 # ---------------------------------------------------------------------------
 # In-memory aggregation state
@@ -174,6 +183,15 @@ def ingest(log_record: dict) -> None:
     logger.debug(
         "ingest | service=%s severity=%s buffer_size=%d",
         service, severity, len(_log_buffer),
+    )
+
+
+def validate_log_record(log_record: dict) -> None:
+    """Validate one record against the shared log schema before aggregation."""
+    jsonschema.validate(
+        log_record,
+        LOG_SCHEMA,
+        format_checker=jsonschema.FormatChecker(),
     )
 
 
@@ -387,25 +405,44 @@ def ingest_dlq_event(dlq_envelope: dict) -> None:
 # KAFKA LAG POLLING
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _poll_consumer_lag(admin_client: AdminClient) -> None:
+def _poll_consumer_lag() -> None:
     """
-    Query Kafka AdminClient for consumer group lag and persist to DB.
+    Query Kafka consumer-group offsets and persist lag snapshots to DB.
 
     Fetches the committed offsets for the main consumer group
     (KAFKA_CONSUMER_GROUP, i.e., Person 2's consumer group) and compares
     them against the topic's high-water marks to compute per-partition lag.
     """
     try:
-        # Get committed offsets for Person 2's consumer group.
-        request = ListConsumerGroupOffsetsRequest(KAFKA_CONSUMER_GROUP)
-        future_map = admin_client.list_consumer_group_offsets([request])
+        # Read committed offsets through a temporary consumer. This keeps the
+        # lag calculation compatible with the confluent-kafka versions pinned
+        # by the project and avoids relying on version-specific AdminClient
+        # request models.
+        temp_conf = {
+            "bootstrap.servers": KAFKA_BROKER,
+            "group.id": KAFKA_CONSUMER_GROUP,
+            "enable.auto.commit": False,
+        }
+        temp_consumer = Consumer(temp_conf)
+        try:
+            metadata = temp_consumer.list_topics(KAFKA_TOPIC_LOGS, timeout=5.0)
+            topic_metadata = metadata.topics.get(KAFKA_TOPIC_LOGS)
+            if topic_metadata is None or topic_metadata.error is not None:
+                logger.debug("_poll_consumer_lag | topic metadata unavailable")
+                return
 
-        committed = {}
-        for group_id, future in future_map.items():
-            response = future.result()
-            for tp in response.topic_partitions:
-                if tp.topic == KAFKA_TOPIC_LOGS and tp.offset >= 0:
-                    committed[tp.partition] = tp.offset
+            topic_partitions = [
+                TopicPartition(KAFKA_TOPIC_LOGS, partition_id)
+                for partition_id in topic_metadata.partitions
+            ]
+            committed_offsets = temp_consumer.committed(topic_partitions, timeout=5.0)
+            committed = {
+                tp.partition: tp.offset
+                for tp in committed_offsets
+                if tp.offset >= 0
+            }
+        finally:
+            temp_consumer.close()
 
         if not committed:
             logger.debug("_poll_consumer_lag | no committed offsets found")
@@ -413,11 +450,11 @@ def _poll_consumer_lag(admin_client: AdminClient) -> None:
 
         # Get high-water marks (end offsets) for each partition using
         # a temporary consumer to query watermark offsets.
-        temp_conf = {
+        temp_consumer = Consumer({
             "bootstrap.servers": KAFKA_BROKER,
-            "group.id": "_lag_checker_temp",
-        }
-        temp_consumer = Consumer(temp_conf)
+            "group.id": "_lag_checker_watermarks",
+            "enable.auto.commit": False,
+        })
         partition_lags = {}
         try:
             for partition_id, committed_offset in committed.items():
@@ -471,15 +508,12 @@ def run_aggregation_loop() -> None:
     consumer_conf = {
         "bootstrap.servers": KAFKA_BROKER,
         "group.id": AGGREGATOR_GROUP,
-        "auto.offset.reset": "latest",
+        "auto.offset.reset": os.environ.get("AGGREGATOR_AUTO_OFFSET_RESET", "earliest"),
         "enable.auto.commit": True,
         "auto.commit.interval.ms": 5000,
     }
     consumer = Consumer(consumer_conf)
     consumer.subscribe([KAFKA_TOPIC_LOGS, KAFKA_TOPIC_DLQ])
-
-    # --- Kafka AdminClient for consumer lag polling ---
-    admin_client = AdminClient({"bootstrap.servers": KAFKA_BROKER})
 
     last_flush_time = time.monotonic()
     last_lag_poll_time = time.monotonic()
@@ -507,7 +541,7 @@ def run_aggregation_loop() -> None:
             # Check if it's time to poll consumer lag (30s)
             # ----------------------------------------------------------
             if now - last_lag_poll_time >= LAG_POLL_SECONDS:
-                _poll_consumer_lag(admin_client)
+                _poll_consumer_lag()
                 last_lag_poll_time = now
 
             # ----------------------------------------------------------
@@ -534,10 +568,11 @@ def run_aggregation_loop() -> None:
             if topic == KAFKA_TOPIC_LOGS:
                 # --- Process a valid log record ---
                 try:
+                    validate_log_record(value)
                     ingest(value)
                     messages_in_window += 1
-                except KeyError as e:
-                    logger.warning("Log record missing required field %s, skipping", e)
+                except (KeyError, jsonschema.ValidationError) as e:
+                    logger.warning("Invalid log record, skipping: %s", e)
 
             elif topic == KAFKA_TOPIC_DLQ:
                 # --- Process a DLQ event ---
