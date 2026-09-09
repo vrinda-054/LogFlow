@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import argparse
 from datetime import datetime, timezone
 
 try:
@@ -30,12 +31,18 @@ def valid_message(index: int) -> dict[str, str]:
 
 
 def main() -> None:
-    """Publish three valid records and three deliberately bad payloads."""
+    """Publish valid records and three deliberately bad payloads."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--count", type=int, default=3, help="Number of valid records to publish")
+    args = parser.parse_args()
+    if args.count < 0:
+        parser.error("--count must be non-negative")
+
     broker = os.environ.get("KAFKA_BROKER", "localhost:9092")
     topic = os.environ.get("KAFKA_TOPIC_LOGS", "logs-raw")
     producer = Producer({"bootstrap.servers": broker})
     payloads = [
-        json.dumps(valid_message(index)).encode("utf-8") for index in range(3)
+        json.dumps(valid_message(index)).encode("utf-8") for index in range(args.count)
     ] + [
         json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "service": "manual-test"}).encode("utf-8"),
         b"{invalid_json_payload",
