@@ -208,7 +208,9 @@ def main() -> None:
     high_water = int(os.environ.get("BACKPRESSURE_HIGH_WATER", "5000"))
     heartbeat_interval = float(os.environ.get("CONSUMER_HEARTBEAT_INTERVAL_SEC", "10"))
     max_retries = int(os.environ.get("DLQ_MAX_RETRIES", "3"))
+    pause_duration_sec = max(0.0, float(os.environ.get("BACKPRESSURE_PAUSE_SEC", "1")))
     paused: set[int] = set()
+    paused_since: dict[int, float] = {}
     processed: deque[float] = deque()
     partition_counts: dict[int, deque[float]] = {}
     last_heartbeat = 0.0
@@ -218,6 +220,23 @@ def main() -> None:
         while not stopping:
             message = consumer.poll(1.0)
             now = time.time()
+
+            # A paused partition cannot reduce its own Kafka lag. Re-check it
+            # on a bounded cooldown so normal polling can resume and drain it.
+            if paused:
+                assigned_by_partition = {tp.partition: tp for tp in consumer.assignment()}
+                for partition in list(paused):
+                    if now - paused_since.get(partition, now) < pause_duration_sec:
+                        continue
+                    topic_partition = assigned_by_partition.get(partition)
+                    if topic_partition is None:
+                        paused.discard(partition)
+                        paused_since.pop(partition, None)
+                        continue
+                    lag = _partition_lag(consumer, topic_partition)
+                    resume_partition(consumer, topic_partition, lag, low_water)
+                    paused.discard(partition)
+                    paused_since.pop(partition, None)
 
             if message is not None and message.error():
                 _log(args.consumer_id, logging.ERROR, "Kafka poll error: %s", message.error())
@@ -231,9 +250,11 @@ def main() -> None:
                 if action == "PAUSE" and partition not in paused:
                     pause_partition(consumer, topic_partition, lag, high_water)
                     paused.add(partition)
+                    paused_since[partition] = now
                 elif action == "RESUME" and partition in paused:
                     resume_partition(consumer, topic_partition, lag, low_water)
                     paused.discard(partition)
+                    paused_since.pop(partition, None)
 
                 raw = message.value()
                 raw_text = raw.decode("utf-8", errors="replace")
@@ -259,7 +280,12 @@ def main() -> None:
                         }],
                     )
                     success = False
-                consumer.commit(message=message, asynchronous=False)
+                try:
+                    consumer.commit(message=message, asynchronous=False)
+                except KafkaException as exc:
+                    # A rebalance may invalidate this generation after the
+                    # message was processed; the new owner can replay it.
+                    _log(args.consumer_id, logging.WARNING, "message commit deferred during rebalance: %s", exc)
 
                 if success:
                     processed.append(now)
