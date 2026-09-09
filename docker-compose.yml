@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-common-env: &common-env
   KAFKA_BROKER: kafka:9092
   KAFKA_TOPIC_LOGS: logs-raw

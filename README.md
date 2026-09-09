@@ -35,7 +35,7 @@ flowchart TD
         API["FastAPI\n:8000\n/metrics/throughput\n/metrics/lag\n/metrics/errors\n/dlq/messages"]
     end
 
-    subgraph dashboard["dashboard/  (Person 4)"]
+    subgraph dashboard["frontend/  (Person 4)"]
         REACT["React Dashboard\n:5173\nThroughputChart\nConsumerLagPanel\nErrorRatePanel\nDLQViewer"]
     end
 
@@ -127,7 +127,7 @@ flowchart TD
 | `ingestion/`    | Person 1 | Log generator, Kafka producer, log templates      |
 | `consumers/`    | Person 2 | Consumer group, DLQ handler, backpressure, rebalance config |
 | `processing/`   | Person 3 | Aggregator, PostgreSQL schema, FastAPI endpoints  |
-| `dashboard/`    | Person 4 | React UI, Recharts panels, API client             |
+| `frontend/`     | Person 4 | React UI, Recharts panels, API client             |
 | `shared/schemas/` | All   | Shared JSON schemas — **DO NOT modify unilaterally** |
 | `tests/`        | All      | Scenario test docs — one per test case            |
 
@@ -138,8 +138,8 @@ flowchart TD
 | Schema | Produced by | Consumed by |
 |--------|-------------|-------------|
 | `shared/schemas/log_schema.json` | `ingestion/producer.py` | `consumers/consumer.py` |
-| `shared/schemas/dlq_schema.json` | `consumers/dlq_handler.py` | `processing/aggregator.py`, `dashboard/DLQViewer.jsx` |
-| FastAPI JSON responses | `processing/api/main.py` | `dashboard/src/api/client.js` |
+| `shared/schemas/dlq_schema.json` | `consumers/dlq_handler.py` | `processing/aggregator.py`, `frontend/src/pages/DlqInspectorPage.tsx` |
+| FastAPI JSON responses | `processing/api/main.py` | `frontend/src/api.ts` |
 | PostgreSQL tables | `processing/aggregator.py` | `processing/api/main.py` |
 
 > ⚠️ **Schema changes require team agreement.** Any modification to
@@ -168,7 +168,8 @@ This starts:
 - **Kafka** (KRaft mode, port 9092)
 - **kafka-init** (creates `logs-raw` topic with 4 partitions + `logs-dlq` with 1)
 - **PostgreSQL** (port 5432, schema auto-applied from `processing/db/schema.sql`)
-- Placeholder containers for producer and dashboard
+- The Compose producer and dashboard entries are placeholders; run ingestion from
+  the host and start the Vite frontend separately.
 - Consumer group containers, FastAPI (`processing`), and the processing worker
 
 Verify Kafka topics:
@@ -220,7 +221,7 @@ curl http://localhost:8000/dlq/messages?limit=20
 ### 6. Person 4 — Dashboard
 
 ```bash
-cd dashboard
+cd frontend
 npm install
 npm run dev
 # Open http://localhost:5173
@@ -236,12 +237,12 @@ Copy to `.env` before running any service. Key variables:
 | Variable | Default | Used by |
 |----------|---------|---------|
 | `KAFKA_BROKER` | `localhost:9092` | producer.py, consumer.py |
-| `KAFKA_TOPIC_LOGS` | `logs` | producer.py, consumer.py |
+| `KAFKA_TOPIC_LOGS` | `logs-raw` | producer.py, consumer.py |
 | `KAFKA_TOPIC_DLQ` | `logs-dlq` | dlq_handler.py |
 | `KAFKA_CONSUMER_GROUP` | `logflow-group` | consumer.py, rebalance_config.py |
 | `DATABASE_URL` | `postgresql://...@localhost:5432/logflow` | connection.py |
 | `FASTAPI_PORT` | `8000` | api/main.py |
-| `VITE_API_BASE_URL` | `http://localhost:8000` | dashboard/src/api/client.js |
+| `VITE_API_BASE_URL` | `http://localhost:8000` | frontend/src/api.ts |
 
 ---
 
