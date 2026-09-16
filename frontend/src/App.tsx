@@ -6,6 +6,15 @@ import DlqInspectorPage from './pages/DlqInspectorPage';
 import LiveLogsPage from './pages/LiveLogsPage';
 import OverviewPage from './pages/OverviewPage';
 import TestScenariosPage from './pages/TestScenariosPage';
+import {
+  getConsumerLag,
+  getConsumerStatus,
+  getDlqMessages,
+  getErrorRates,
+  getThroughput,
+  healthCheck,
+  getLogs,
+} from './api';
 
 type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
 type LogEntry = {
@@ -41,26 +50,18 @@ const navItems = [
 ];
 
 const initialBaseMetrics = [
-  { label: 'System', value: '5/5', status: 'Healthy' },
-  { label: 'AI pipeline', value: 'Normal', status: 'Healthy' },
-  { label: 'Consumer', value: '3 / 3', status: 'Active' },
-  { label: 'Kafka', value: 'Online', status: 'Healthy' },
-  { label: 'API', value: 'Online', status: 'Healthy' },
-  { label: 'Database', value: 'Online', status: 'Healthy' },
+  { label: 'System', value: 'Loading', status: 'Unknown' },
+  { label: 'AI pipeline', value: 'Loading', status: 'Unknown' },
+  { label: 'Consumer', value: 'Loading', status: 'Unknown' },
+  { label: 'Kafka', value: 'Unavailable', status: 'Unknown' },
+  { label: 'API', value: 'Loading', status: 'Unknown' },
+  { label: 'Database', value: 'Loading', status: 'Unknown' },
 ];
 
 const overviewConsumerCards = [
   { id: 'C1', status: 'RUNNING', rate: '742/s', lag: '124' },
   { id: 'C2', status: 'RUNNING', rate: '811/s', lag: '87' },
   { id: 'C3', status: 'RUNNING', rate: '631/s', lag: '131' },
-];
-
-const baseEvents = [
-  { ts: '18:59:42', service: 'INFO', text: 'Consumer 3 heartbeat received' },
-  { ts: '18:59:37', service: 'INFO', text: 'Consumer 2 rebalanced automatically' },
-  { ts: '18:59:39', service: 'WARN', text: 'Partition 2 lag spike detected' },
-  { ts: '18:59:45', service: 'ERROR', text: 'Consumer 1 retry queue exceeded threshold' },
-  { ts: '18:59:52', service: 'INFO', text: 'Kafka cluster state stable' },
 ];
 
 const baseDlqData: DlqEntry[] = [
@@ -127,17 +128,72 @@ function AppShell({ children }: { children: React.ReactNode }) {
 function LegacyOverviewPage() {
   const navigate = useNavigate();
   const [metrics, setMetrics] = useState(initialBaseMetrics);
+  const [health, setHealth] = useState<Awaited<ReturnType<typeof healthCheck>> | null>(null);
+  const [consumerStatus, setConsumerStatus] = useState<Awaited<ReturnType<typeof getConsumerStatus>> | null>(null);
+  const [throughput, setThroughput] = useState<Awaited<ReturnType<typeof getThroughput>> | null>(null);
+  const [errorRates, setErrorRates] = useState<Awaited<ReturnType<typeof getErrorRates>> | null>(null);
+  const [dlq, setDlq] = useState<Awaited<ReturnType<typeof getDlqMessages>> | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const refreshOverview = async () => {
+    try {
+      const [healthData, consumerData, throughputData, lagData, errorData, dlqData] =
+      await Promise.all([
+        healthCheck(),
+        getConsumerStatus(),
+        getThroughput(5),
+        getConsumerLag(),
+        getErrorRates(5),
+        getDlqMessages(),
+      ]);
+    setHealth(healthData);
+    setConsumerStatus(consumerData);
+    setThroughput(throughputData);
+    setErrorRates(errorData);
+    setDlq(dlqData);
 
-  const refreshOverview = () => {
-    const next = [...initialBaseMetrics].map((item, idx) => {
-      if (idx === 0) return { ...item, value: `${Math.max(3, Math.min(5, Math.floor(Math.random() * 5) + 1))}/5` };
-      if (idx === 2) return { ...item, value: `${Math.floor(Math.random() * 3) + 1} / 3` };
-      if (idx === 3) return { ...item, value: Math.random() > 0.7 ? 'Paused' : 'Online' };
-      if (idx === 4) return { ...item, value: Math.random() > 0.7 ? 'Degraded' : 'Online' };
-      return item;
-    });
-    setMetrics(next);
-  };
+    setMetrics([
+      {
+        label: 'System',
+        value: `${consumerData.partitions.filter(
+          (p: { health: string }) => p.health === 'HEALTHY'
+        ).length}/${consumerData.partitions.length}`,
+        status: 'Healthy',
+      },
+      {
+        label: 'AI pipeline',
+        value: consumerData.consumer.status,
+        status: consumerData.consumer.status === 'RUNNING' ? 'Healthy' : 'Warning',
+      },
+      {
+        label: 'Consumer',
+        value: consumerData.consumer.status,
+        status: consumerData.consumer.status === 'RUNNING' ? 'Active' : 'Inactive',
+      },
+      {
+        label: 'Kafka',
+        value: 'Unavailable',
+        status: 'Unknown',
+      },
+      {
+        label: 'API',
+        value: healthData.status === 'ok' ? 'Online' : 'Degraded',
+        status: healthData.status === 'ok' ? 'Healthy' : 'Warning',
+      },
+      {
+        label: 'Database',
+        value: healthData.database === 'connected' ? 'Online' : 'Degraded',
+        status: healthData.database === 'connected' ? 'Healthy' : 'Warning',
+      },
+    ]);
+    setLastRefresh(new Date());
+  } catch (error) {
+    console.error('Failed to refresh overview:', error);
+  }
+};
+useEffect(() => {
+  refreshOverview();
+}, []);
+  const refreshAgeMinutes = lastRefresh ? Math.floor((Date.now() - lastRefresh.getTime()) / 60000) : null;
 
   return (
     <DashboardShell>
@@ -149,7 +205,7 @@ function LegacyOverviewPage() {
           </div>
           <div className="header-actions">
             <span className="pill live">● LIVE</span>
-            <span className="pill muted">Updated 2s ago</span>
+            <span className="pill muted">{refreshAgeMinutes == null ? 'Not updated' : `Updated ${refreshAgeMinutes === 0 ? 'just now' : `${refreshAgeMinutes}m ago`}`}</span>
             <span className="pill muted">Last 5 minutes</span>
             <button className="small-btn" onClick={refreshOverview}>Refresh</button>
           </div>
@@ -169,32 +225,50 @@ function LegacyOverviewPage() {
           <section className="panel chart-panel">
             <div className="panel-title-row">
               <span>THROUGHPUT</span>
-              <span className="status-tag healthy">● HEALTHY</span>
+              <span className="status-tag">Status unavailable</span>
             </div>
-            <div className="big-number">2,184 <span>msg/s</span></div>
-            <div className="mini-change">+8.6% vs previous period</div>
+            <div className="big-number">
+              {throughput?.summary.current_rate.toLocaleString() ?? '0' } <span>msg/s</span>
+            </div>
+            <div className="mini-change">
+              Peak {throughput?.summary.peak_rate.toLocaleString() ?? '0' } msg/s
+            </div>
             <div className="sparkline spark-green" />
-            <div className="axis">Peak 4.42s, Avg 2.21s, Log 2.18s</div>
+            <div className="axis">
+              Avg {throughput?.summary.average_rate.toLocaleString() ?? '0' } msg/s
+            </div>
           </section>
 
           <section className="panel">
             <div className="panel-title-row">
               <span>CONSUMER LAG</span>
-              <span className="status-tag healthy">● HEALTHY</span>
+              <span className="status-tag">Status unavailable</span>
             </div>
             <div className="bars-stack">
-              <div className="bar-row"><span>P1</span><div className="bar"><i style={{ width: '88%' }} /></div><span>91</span></div>
-              <div className="bar-row"><span>P2</span><div className="bar"><i style={{ width: '75%' }} /></div><span>87</span></div>
-              <div className="bar-row"><span>P3</span><div className="bar"><i style={{ width: '60%' }} /></div><span>124</span></div>
+              {consumerStatus?.partitions.map((partition) => (
+                <div className="bar-row" key={partition.partition}>
+                  <span>P{partition.partition}</span>
+                  <div className="bar">
+                    <i
+                    style={{
+                      width: `${Math.min(100, partition.current_lag)}%`,
+                    }}
+                    />
+                  </div>
+                  <span>{partition.current_lag}</span>
+                </div>
+              ))}
             </div>
           </section>
 
           <section className="panel chart-panel">
             <div className="panel-title-row">
               <span>ERROR RATE</span>
-              <span className="status-tag healthy">● HEALTHY</span>
+              <span className="status-tag">Status unavailable</span>
             </div>
-            <div className="big-number small">0.42% </div>
+            <div className="big-number small">
+              {errorRates?.summary.overall_error_rate_pct != null ? `${errorRates.summary.overall_error_rate_pct}%` : '--'}
+            </div>
             <div className="tiny-legend">
               <span>API</span><span>Payment</span><span>Auth</span><span>Database</span>
             </div>
@@ -206,12 +280,8 @@ function LegacyOverviewPage() {
               <span>DEAD LETTER QUEUE</span>
               <span className="status-tag danger">● ATTENTION</span>
             </div>
-            <div className="big-number small red">127</div>
-            <div className="queue-bars">
-              <span style={{ width: '88%' }} />
-              <span style={{ width: '72%' }} />
-              <span style={{ width: '65%' }} />
-            </div>
+            <div className="big-number small red">{dlq?.total ?? 0}</div>
+            <div className="queue-bars">Queue distribution unavailable</div>
             <div className="inline-action-row">
               <button className="ghost-btn" onClick={() => navigate('/dlq')}>View DLQ</button>
             </div>
@@ -220,34 +290,30 @@ function LegacyOverviewPage() {
           <section className="panel wide-panel">
             <div className="panel-title-row"><span>CONSUMER HEALTH</span></div>
             <div className="three-cards">
-              {overviewConsumerCards.map((item) => (
-                <button type="button" key={item.id} className="health-card clickable-card" onClick={() => navigate('/consumers')}>
-                  <div className="health-header"><span className="dot green"/> {item.id} <span className="status-tag running">{item.status}</span></div>
+              {consumerStatus?.consumer && (
+                <button type="button" key={consumerStatus.consumer.consumer_id} className="health-card clickable-card" onClick={() => navigate('/consumers')}>
+                  <div className="health-header"><span className="dot green"/> {consumerStatus.consumer.consumer_id} <span className="status-tag running">{consumerStatus.consumer.status}</span></div>
                   <div className="health-metrics">
-                    <div><strong>{item.rate}</strong><span>Processing rate</span></div>
-                    <div><strong>{item.lag}</strong><span>Lag</span></div>
+                    <div><strong>{consumerStatus.consumer.processing_rate}</strong><span>Processing rate</span></div>
+                    <div><strong>{consumerStatus.consumer.consumer_lag}</strong><span>Lag</span></div>
                   </div>
                 </button>
-              ))}
+              )}
             </div>
           </section>
 
           <section className="panel recent-panel">
-            <div className="panel-title-row"><span>RECENT EVENTS</span><span className="status-tag info">LIVE</span></div>
-            <ul className="event-list">
-              {baseEvents.map((row, idx) => (
-                <li key={idx}><span className="event-time">{row.ts}</span><span className={`event-service ${row.service.toLowerCase()}`}>{row.service}</span><span>{row.text}</span></li>
-              ))}
-            </ul>
+            <div className="panel-title-row"><span>RECENT EVENTS</span></div>
+            <div className="empty-state">Recent event data unavailable</div>
           </section>
         </div>
 
         <div className="bottom-bar">
-          {['LOG GENERATOR', 'CONSUMERS', 'PROCESSING', 'POSTGRES'].map((label, idx) => (
+          {['LOG GENERATOR', 'CONSUMERS', 'PROCESSING', 'POSTGRES'].map((label) => (
             <div key={label} className="pipeline-card">
               <span>{label}</span>
-              <strong>{idx === 0 || idx === 1 ? '2,184/s' : '2,102/s'}</strong>
-              <small>ONLINE</small>
+              <strong>Unavailable</strong>
+              <small>Unavailable</small>
             </div>
           ))}
         </div>
@@ -405,68 +471,104 @@ function DlqPage() {
 }
 
 function LogsPage() {
-  const [logs, setLogs] = useState<LogEntry[]>(baseLogData);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [live, setLive] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [levelFilter, setLevelFilter] = useState<LogLevel>('ALL');
   const [serviceFilter, setServiceFilter] = useState('ALL');
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedId, setSelectedId] = useState<number | null>(baseLogData[0].id);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!live) return;
-    const timer = window.setInterval(() => {
-      const level: LogEntry['level'] = Math.random() > 0.7 ? 'WARN' : 'INFO';
-      setLogs((prev) => [
-        {
-          id: prev[0] ? prev[0].id + 1 : 1,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
-          level,
-          service: ['API', 'PAYMENT', 'DATABASE', 'AUTH'][Math.floor(Math.random() * 4)],
-          consumer: `C${Math.floor(Math.random() * 3) + 1}`,
-          trace: `tr-${Math.random().toString(16).slice(2, 7)}`,
-          message: 'Mock event received from pipeline',
-          payload: '{"mock":true,"event":"live"}',
-        },
-        ...prev,
-      ].slice(0, 14));
-    }, 3000);
+
+    const loadLogs = async () => {
+      try {
+        const response = await getLogs(50, 0);
+
+        const mappedLogs: LogEntry[] = response.logs.map((log) => ({
+          id: log.id,
+          timestamp: new Date(log.timestamp).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+          }),
+          level: log.severity === 'WARNING' ? 'WARN' : log.severity as LogEntry['level'],
+          service: log.service.toUpperCase(),
+          consumer: 'Aggregator',
+          trace: log.trace_id,
+          message: log.message,
+          payload: JSON.stringify(log, null, 2),
+        }));
+
+        setLogs(mappedLogs);
+
+        setSelectedId((current) => {
+          if (current !== null && mappedLogs.some((log) => log.id === current)) {
+            return current;
+          }
+          return mappedLogs[0]?.id ?? null;
+        });
+      } catch (error) {
+        console.error('Failed to load logs:', error);
+      }
+    };
+
+    loadLogs();
+
+    const timer = window.setInterval(loadLogs, 3000);
+
     return () => window.clearInterval(timer);
   }, [live]);
 
   const visibleLogs = useMemo(() => {
     return logs.filter((entry) => {
-      const messageMatch = searchTerm ? `${entry.message} ${entry.service} ${entry.trace}`.toLowerCase().includes(searchTerm.toLowerCase()) : true;
-      const levelMatch = levelFilter === 'ALL' || entry.level === levelFilter;
-      const serviceMatch = serviceFilter === 'ALL' || entry.service === serviceFilter;
+      const messageMatch = searchTerm
+        ? `${entry.message} ${entry.service} ${entry.trace}`
+            .toLowerCase()
+            .includes(searchTerm.toLowerCase())
+        : true;
+
+      const levelMatch =
+        levelFilter === 'ALL' || entry.level === levelFilter;
+
+      const serviceMatch =
+        serviceFilter === 'ALL' || entry.service === serviceFilter;
+
       return messageMatch && levelMatch && serviceMatch;
     });
   }, [logs, levelFilter, serviceFilter, searchTerm]);
 
-  const selectedLog = visibleLogs.find((entry) => entry.id === selectedId) ?? visibleLogs[0] ?? logs[0];
+  const selectedLog =
+    visibleLogs.find((entry) => entry.id === selectedId) ??
+    visibleLogs[0] ??
+    logs[0];
 
   const exportLogs = () => {
-    const blob = new Blob([JSON.stringify(visibleLogs, null, 2)], { type: 'application/json' });
+    const blob = new Blob(
+      [JSON.stringify(visibleLogs, null, 2)],
+      { type: 'application/json' }
+    );
+
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
+
     link.href = url;
     link.download = 'logflow-logs.json';
     link.click();
+
     URL.revokeObjectURL(url);
   };
 
   const copySelectedLog = async () => {
     if (!selectedLog) return;
+
     try {
       await navigator.clipboard.writeText(selectedLog.payload);
     } catch {
-      // ignore clipboard errors in mock mode
+      console.error('Failed to copy log JSON');
     }
-  };
-
-  const clearStream = () => {
-    setLogs([]);
-    setSelectedId(null);
   };
 
   return (
@@ -477,48 +579,139 @@ function LogsPage() {
             <h1>Live Log Stream</h1>
             <p>Real-time view of messages flowing through the LogFlow pipeline</p>
           </div>
+
           <div className="header-actions">
-            <button className="toggle-btn" onClick={() => setLive((v) => !v)}>{live ? 'LIVE' : 'PAUSED'}</button>
-            <button className="small-btn" onClick={() => setAutoScroll((v) => !v)}>{autoScroll ? 'Auto Scroll ON' : 'Auto Scroll OFF'}</button>
+            <button
+              className="toggle-btn"
+              onClick={() => setLive((v) => !v)}
+            >
+              {live ? 'LIVE' : 'PAUSED'}
+            </button>
+
+            <button
+              className="small-btn"
+              onClick={() => setAutoScroll((v) => !v)}
+            >
+              {autoScroll ? 'Auto Scroll ON' : 'Auto Scroll OFF'}
+            </button>
           </div>
         </header>
 
         <div className="stats-row">
-          <div className="mini-stat"><strong>{logs.length}</strong><span>Processed</span></div>
-          <div className="mini-stat"><strong>{logs.filter((item) => item.level === 'ERROR').length}</strong><span>Errors</span></div>
-          <div className="mini-stat"><strong>{logs.filter((item) => item.level === 'WARN').length}</strong><span>Dead Letter</span></div>
-          <div className="mini-stat"><strong>{logs.filter((item) => item.service === 'API').length}</strong><span>Active</span></div>
+          <div className="mini-stat">
+            <strong>{logs.length}</strong>
+            <span>Processed</span>
+          </div>
+
+          <div className="mini-stat">
+            <strong>
+              {logs.filter((item) => item.level === 'ERROR').length}
+            </strong>
+            <span>Errors</span>
+          </div>
+
+          <div className="mini-stat">
+            <strong>
+              {logs.filter((item) => item.level === 'WARN').length}
+            </strong>
+            <span>Warnings</span>
+          </div>
+
+          <div className="mini-stat">
+            <strong>
+              {new Set(logs.map((item) => item.service)).size}
+            </strong>
+            <span>Services</span>
+          </div>
         </div>
 
         <div className="logs-shell">
           <section className="panel stream-panel">
             <div className="stream-controls">
-              <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search logs..." />
-              <select value={levelFilter} onChange={(e) => setLevelFilter(e.target.value as LogLevel)}>
+              <input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search logs..."
+              />
+
+              <select
+                value={levelFilter}
+                onChange={(e) =>
+                  setLevelFilter(e.target.value as LogLevel)
+                }
+              >
                 <option value="ALL">ALL</option>
                 <option value="INFO">INFO</option>
                 <option value="WARN">WARN</option>
                 <option value="ERROR">ERROR</option>
+                <option value="DEBUG">DEBUG</option>
+                <option value="CRITICAL">CRITICAL</option>
               </select>
-              <select value={serviceFilter} onChange={(e) => setServiceFilter(e.target.value)}>
+
+              <select
+                value={serviceFilter}
+                onChange={(e) => setServiceFilter(e.target.value)}
+              >
                 <option value="ALL">ALL SERVICES</option>
-                {Array.from(new Set(logs.map((item) => item.service))).map((service) => (
-                  <option key={service} value={service}>{service}</option>
+
+                {Array.from(
+                  new Set(logs.map((item) => item.service))
+                ).map((service) => (
+                  <option key={service} value={service}>
+                    {service}
+                  </option>
                 ))}
               </select>
-              <button className="ghost-btn" onClick={clearStream}>Clear Stream</button>
-              <button className="ghost-btn" onClick={exportLogs}>Export</button>
+
+              <button
+                className="ghost-btn"
+                onClick={() => setLogs([])}
+              >
+                Clear Stream
+              </button>
+
+              <button
+                className="ghost-btn"
+                onClick={exportLogs}
+              >
+                Export
+              </button>
             </div>
+
             <div className="log-table-wrap">
               <table className="log-table">
                 <thead>
-                  <tr><th>Timestamp</th><th>Level</th><th>Service</th><th>Consumer</th><th>Trace</th><th>Message</th></tr>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Level</th>
+                    <th>Service</th>
+                    <th>Consumer</th>
+                    <th>Trace</th>
+                    <th>Message</th>
+                  </tr>
                 </thead>
+
                 <tbody>
                   {visibleLogs.map((row) => (
-                    <tr key={row.id} className={selectedId === row.id ? 'selected-row' : ''} onClick={() => setSelectedId(row.id)}>
+                    <tr
+                      key={row.id}
+                      className={
+                        selectedId === row.id
+                          ? 'selected-row'
+                          : ''
+                      }
+                      onClick={() => setSelectedId(row.id)}
+                    >
                       <td>{row.timestamp}</td>
-                      <td><span className={`level level-${row.level.toLowerCase()}`}>{row.level}</span></td>
+
+                      <td>
+                        <span
+                          className={`level level-${row.level.toLowerCase()}`}
+                        >
+                          {row.level}
+                        </span>
+                      </td>
+
                       <td>{row.service}</td>
                       <td>{row.consumer}</td>
                       <td>{row.trace}</td>
@@ -532,21 +725,58 @@ function LogsPage() {
 
           <aside className="side-panel log-detail">
             <div className="detail-card">
-              <div className="detail-header">Log Event Details</div>
+              <div className="detail-header">
+                Log Event Details
+              </div>
+
               {selectedLog ? (
                 <>
-                  <div className="detail-key">Timestamp <span>{selectedLog.timestamp}</span></div>
-                  <div className="detail-key">Service <span>{selectedLog.service}</span></div>
-                  <div className="detail-key">Consumer <span>{selectedLog.consumer}</span></div>
-                  <div className="detail-key">Trace ID <span>{selectedLog.trace}</span></div>
-                  <div className="preview-box small"><code>{selectedLog.payload}</code></div>
+                  <div className="detail-key">
+                    Timestamp
+                    <span>{selectedLog.timestamp}</span>
+                  </div>
+
+                  <div className="detail-key">
+                    Service
+                    <span>{selectedLog.service}</span>
+                  </div>
+
+                  <div className="detail-key">
+                    Consumer
+                    <span>{selectedLog.consumer}</span>
+                  </div>
+
+                  <div className="detail-key">
+                    Trace ID
+                    <span>{selectedLog.trace}</span>
+                  </div>
+
+                  <div className="preview-box small">
+                    <code>{selectedLog.payload}</code>
+                  </div>
+
                   <div className="detail-actions">
-                    <button className="mini-button" onClick={copySelectedLog}>Copy JSON</button>
-                    <button className="mini-button alt" onClick={() => window.location.assign('/dlq')}>View in DLQ</button>
+                    <button
+                      className="mini-button"
+                      onClick={copySelectedLog}
+                    >
+                      Copy JSON
+                    </button>
+
+                    <button
+                      className="mini-button alt"
+                      onClick={() =>
+                        window.location.assign('/dlq')
+                      }
+                    >
+                      View in DLQ
+                    </button>
                   </div>
                 </>
               ) : (
-                <div className="empty-state">No log selected</div>
+                <div className="empty-state">
+                  No log selected
+                </div>
               )}
             </div>
           </aside>

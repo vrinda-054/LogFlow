@@ -100,10 +100,29 @@ export type HealthResponse = {
   database: string;
   error?: string;
 };
+export type LogRecord = {
+  id: number;
+  ingested_at: string;
+  timestamp: string;
+  service: string;
+  severity: string;
+  message: string;
+  trace_id: string;
+};
 
-async function apiFetch<T>(path: string, params: Record<string, string | number> = {}): Promise<T> {
+export type LogsResponse = {
+  logs: LogRecord[];
+};
+
+async function apiFetch<T>(
+  path: string,
+  params: Record<string, string | number> = {}
+): Promise<T> {
   const url = new URL(path, API_BASE_URL);
-  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, String(value)));
+
+  Object.entries(params).forEach(([key, value]) => {
+    url.searchParams.set(key, String(value));
+  });
 
   const response = await fetch(url, {
     headers: { Accept: 'application/json' },
@@ -116,8 +135,15 @@ async function apiFetch<T>(path: string, params: Record<string, string | number>
 
   return response.json() as Promise<T>;
 }
+export function getLogs(limit = 50, offset = 0): Promise<LogsResponse> {
+  return apiFetch<LogsResponse>('/logs', { limit, offset });
+}
 
 export function getHealth(): Promise<HealthResponse> {
+  return apiFetch<HealthResponse>('/health');
+}
+
+export function healthCheck(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>('/health');
 }
 

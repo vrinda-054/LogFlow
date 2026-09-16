@@ -1,6 +1,6 @@
 """
 processing/aggregator.py — Person 3 (Processing Layer)
-========================================================
+
 
 Role
 ----

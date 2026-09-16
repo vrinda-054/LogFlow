@@ -65,7 +65,7 @@ function toConsumers(status: ConsumerStatusResponse): DemoConsumer[] {
       status: 'RUNNING',
       rate: 0,
       lag: 0,
-      heartbeat: 'just now',
+      heartbeat: new Date(status.consumer.last_heartbeat).toLocaleTimeString(),
       partitions: [],
     };
     existing.rate += partition.throughput;
@@ -112,6 +112,12 @@ export default function ConsumersPage() {
 
   const partitionMap = useMemo(() => new Map(status.partitions.map((item) => [item.partition, item])), [status.partitions]);
   const selectedLag = data.partitions.find((item) => item.partition_id === selectedPartition)?.lag ?? 0;
+  const activeConsumers = consumers.filter((consumer) => consumer.status === 'RUNNING').length;
+  const totalConsumers = consumers.length;
+  const totalPartitions = status.partitions.length;
+  const totalThroughput = status.partitions.reduce((sum, partition) => sum + partition.throughput, 0);
+  const healthyPartitions = status.partitions.filter((partition) => partition.health === 'HEALTHY').length;
+
 
   return (
     <DashboardShell>
@@ -131,10 +137,28 @@ export default function ConsumersPage() {
         {error && <div className="error-banner" role="alert">Showing demo data: {error}</div>}
 
         <div className="summary-row">
-          <div className="summary-box active"><span>ACTIVE CONSUMERS</span><strong>3 / 3</strong><b>HEALTHY</b></div>
-          <div className="summary-box"><span>TOTAL PARTITIONS</span><strong>4</strong><b className="blue-text">ASSIGNED</b></div>
-          <div className="summary-box"><span>TOTAL THROUGHPUT</span><strong>2,184 msg/s</strong><b>+8.4% HEALTHY</b></div>
-          <div className="summary-box warning"><span>MESSAGES BEHIND</span><strong>{data.total_lag.toLocaleString()}</strong><b className="orange-text">WARNING</b></div>
+          <div className="summary-box active">
+            <span>ACTIVE CONSUMERS</span>
+            <strong>{activeConsumers} / {totalConsumers}</strong>
+            <b>{activeConsumers === totalConsumers ? 'HEALTHY' : 'WARNING'}</b>
+            </div>
+          <div className="summary-box">
+            <span>TOTAL PARTITIONS</span>
+            <strong>{totalPartitions}</strong>
+            <b className="blue-text">ASSIGNED</b>
+            </div>
+          <div className="summary-box">
+            <span>TOTAL THROUGHPUT</span>
+            <strong>{totalThroughput.toLocaleString()} msg/s</strong>
+            <b>{healthyPartitions === totalPartitions ? 'HEALTHY' : 'WARNING'}</b>
+            </div>
+          <div className="summary-box warning">
+            <span>MESSAGES BEHIND</span>
+            <strong>{data.total_lag.toLocaleString()}</strong>
+            <b className={data.total_lag > 1500 ? 'orange-text' : ''}>
+              {data.total_lag > 1500 ? 'WARNING' : 'HEALTHY'}
+            </b>
+            </div>
         </div>
 
         <div className="section-heading"><h2>Consumer Instances</h2><span className="updating">● updating live</span></div>
@@ -186,15 +210,27 @@ export default function ConsumersPage() {
           </section>
           <section className="panel event-inline-panel">
             <div className="panel-title-row"><div><h2>Consumer Group Events</h2><p>Real-time activity log</p></div><span className="status-tag info">● LIVE</span></div>
-            <ul className="event-list compact">{demoEvents.map(([time, level, message]) => <li key={`${time}-${message}`}><span className="event-time">{time}</span><span className={`event-service ${level.toLowerCase()}`}>{level === 'WARN' ? '⚠' : '✓'}</span><span className={level === 'WARN' ? 'orange-text' : ''}>{message}</span></li>)}</ul>
+            <div className="event-empty">
+              No live consumer events are available from the API.
+            </div>
           </section>
         </div>
 
         <section className="rebalancing-panel panel">
           <div className="panel-title-row"><div><h2>Rebalancing State</h2><p>Alternate state — worker failure &amp; partition reassignment</p></div><button className="scenario-button">SCENARIO VIEW</button></div>
           <div className="rebalance-body">
-            <div className="rebalance-card"><h3>Consumer 2 <span className="danger-tag">STOPPED</span><span className="warning-tag">REBALANCING</span></h3><strong>Consumer 2 disconnected — Kafka is reassigning partitions...</strong><p>→ P1 reassigning → Consumer 1</p></div>
-            <div className="rebalance-card"><h3>After Recovery <span className="status-tag running">STABLE</span></h3><p>Partitions redistributed among remaining consumers</p><p>P0 → <b>Consumer 1</b><br />P1 → <b>Consumer 1</b><br />P2 → <b>Consumer 3</b><br />P3 → <b>Consumer 1</b></p></div>
+            <div className="rebalance-card">
+              <h3>
+                Consumer Group
+                <span className={status.rebalancing.state === 'STABLE' ? 'success-tag' : 'warning-tag'}>
+                  {status.rebalancing.state}
+                </span>
+              </h3>
+              <strong>
+                Current assignment: {status.rebalancing.current_assignment.map((p) => `P${p}`).join(', ')}
+              </strong>
+              <p>After recovery: {status.rebalancing.after_recovery}</p>
+            </div>
           </div>
         </section>
       </div>

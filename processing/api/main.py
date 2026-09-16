@@ -86,6 +86,7 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 _allowed_origins = [
     "http://localhost:5173",
+    "http://localhost:5174",
     os.environ.get("VITE_API_BASE_URL", "http://localhost:8000"),
 ]
 
@@ -429,7 +430,43 @@ def get_dlq_messages(
         ]
 
     return {"total": total, "messages": messages}
+@app.get("/logs", tags=["logs"])
+def get_logs(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """
+    Return recent processed log records for the dashboard.
 
+    Input  ← logflow.processed_logs (PostgreSQL)
+    Output → React Live Logs page.
+    """
+    with get_session() as session:
+        rows = session.execute(
+            text("""
+                SELECT id, ingested_at, log_ts, service,
+                       severity, message, trace_id
+                FROM processed_logs
+                ORDER BY log_ts DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            {"limit": limit, "offset": offset},
+        ).fetchall()
+
+        logs = [
+            {
+                "id": row.id,
+                "ingested_at": row.ingested_at.isoformat(),
+                "timestamp": row.log_ts.isoformat(),
+                "service": row.service,
+                "severity": row.severity,
+                "message": row.message,
+                "trace_id": row.trace_id,
+            }
+            for row in rows
+        ]
+
+    return {"logs": logs}
 
 # ---------------------------------------------------------------------------
 # Dev server entry point
