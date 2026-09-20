@@ -403,3 +403,55 @@ button { cursor: pointer; }
   .summary-row { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .three-cards { grid-template-columns: 1fr; }
 }
+.dlq-activity .activity-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.dlq-activity .activity-total strong {
+  color: #ff4d5d;
+  font-size: 1.5rem;
+}
+
+.dlq-activity .activity-total span {
+  color: var(--muted);
+  font-size: .65rem;
+}
+
+.activity-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 42px 1fr 24px;
+  align-items: center;
+  gap: 7px;
+  font-size: .6rem;
+}
+
+.activity-row > span {
+  color: var(--muted);
+}
+
+.activity-row > b {
+  text-align: right;
+}
+
+.activity-bar-track {
+  height: 7px;
+  background: rgba(255,255,255,.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.activity-bar-track i {
+  display: block;
+  height: 100%;
+  background: #ff4d5d;
+  border-radius: 4px;
+}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getDlqMessages, type DlqRecord } from '../api';
+import { getDlqMessages, getDlqActivity, type DlqRecord, type DlqActivityRecord } from '../api';
 import DashboardShell from '../components/DashboardShell';
 
 type ViewMessage = DlqRecord & {
@@ -25,6 +25,7 @@ function toViewMessage(record: DlqRecord): ViewMessage {
 
 export default function DlqInspectorPage() {
   const [messages, setMessages] = useState<ViewMessage[]>([]);
+  const [activity, setActivity] = useState<DlqActivityRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
@@ -35,19 +36,30 @@ export default function DlqInspectorPage() {
 
   const refresh = async () => {
     try {
-      const response = await getDlqMessages();
-      const next = response.messages.map(toViewMessage);
-      setMessages(next);
-      setTotal(response.total);
-      setSelectedId((current) => next.some((item) => item.id === current) ? current : next[0]?.id ?? null);
-      setIsLive(true);
-      setLastRefresh(new Date());
-      setError(null);
-    } catch (requestError) {
-      setIsLive(false);
-      setError(requestError instanceof Error ? requestError.message : 'Unable to load DLQ messages');
-    }
-  };
+      const [response, activityResponse] = await Promise.all([
+        getDlqMessages(),
+        getDlqActivity(24),
+    ]);
+
+    const next = response.messages.map(toViewMessage);
+
+    setMessages(next);
+    setTotal(response.total);
+    setActivity(activityResponse.activity);
+    setSelectedId((current) =>
+      next.some((item) => item.id === current) ? current : next[0]?.id ?? null
+    );
+    setIsLive(true);
+    setLastRefresh(new Date());
+    setError(null);
+  } catch (requestError) {
+    setIsLive(false);
+    setError(
+      requestError instanceof Error
+        ? requestError.message
+        : 'Unable to load DLQ data'
+    );
+  }};
 
   useEffect(() => {
     void refresh();
@@ -121,7 +133,52 @@ export default function DlqInspectorPage() {
 
         <div className="dlq-bottom-panels">
           <section className="panel failure-reasons"><h2>Failure Reasons</h2><div className="reason-bars">{failureReasonCounts.length > 0 ? failureReasonCounts.map(([name, count], index) => <div className="reason-bar" key={name}><span>{name}</span><b>{count}</b><i className={['red', 'orange', 'blue', 'gray'][index % 4]} style={{ width: `${count * 1.45}%` }} /></div>) : <div className="empty-state">No failure reasons available</div>}</div></section>
-          <section className="panel dlq-activity"><h2>● DLQ Activity</h2><strong>Live activity data unavailable from API</strong><p>The API does not provide activity history.</p><small>Unavailable</small></section>
+          <section className="panel dlq-activity">
+            <h2>● DLQ Activity</h2>
+
+  {activity.length > 0 ? (
+    <>
+      <div className="activity-total">
+        <strong>
+          {activity.reduce((sum, item) => sum + item.count, 0)}
+        </strong>
+        <span>dead-lettered messages</span>
+      </div>
+
+      <div className="activity-bars">
+        {activity.map((item) => {
+          const maxCount = Math.max(...activity.map((entry) => entry.count), 1);
+          const width = (item.count / maxCount) * 100;
+
+          return (
+
+            <div className="activity-row" key={item.timestamp}>
+              <span>
+                {new Date(item.timestamp).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  hour12: false,
+                })}
+              </span>
+              <div className="activity-bar-track">
+                <i style={{ width: `${width}%` }} />
+              </div>
+              <b>{item.count}</b>
+            </div>
+          );
+        })}
+      </div>
+
+      <small>Last 24 hours · Live from API</small>
+    </>
+  ) : (
+    <>
+      <strong>No DLQ activity in the last 24 hours</strong>
+      <p>Activity will appear here when messages enter the dead-letter queue.</p>
+      <small>Live from API</small>
+    </>
+  )}
+</section>
           <section className="panel failure-flow"><h2>Failure Flow</h2><div>PROCESSING FAILURE</div><span>↓</span><div className="flow-retry">RETRY 1　·　RETRY 2　·　RETRY 3</div><span>↓</span><div>DEAD LETTER QUEUE</div><span>↓</span><div className="flow-inspect">INSPECT</div></section>
         </div>
       </div>

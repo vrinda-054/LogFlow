@@ -430,6 +430,36 @@ def get_dlq_messages(
         ]
 
     return {"total": total, "messages": messages}
+@app.get("/dlq/activity", tags=["dlq"])
+def get_dlq_activity(
+    hours: int = Query(default=24, ge=1, le=168),
+):
+    """
+    Return DLQ activity grouped by hour for the dashboard.
+    """
+    with get_session() as session:
+        rows = session.execute(
+            text("""
+                SELECT
+                    date_trunc('hour', failed_at) AS hour,
+                    COUNT(*) AS count
+                FROM dlq_log
+                WHERE failed_at >= NOW() - (:hours * INTERVAL '1 hour')
+                GROUP BY date_trunc('hour', failed_at)
+                ORDER BY hour ASC
+            """),
+            {"hours": hours},
+        ).fetchall()
+
+    activity = [
+        {
+            "timestamp": row.hour.isoformat(),
+            "count": row.count,
+        }
+        for row in rows
+    ]
+
+    return {"activity": activity}
 @app.get("/logs", tags=["logs"])
 def get_logs(
     limit: int = Query(default=50, ge=1, le=500),

@@ -20,6 +20,15 @@ export type DlqRecord = {
   original_message: string;
 };
 
+export type DlqActivityRecord = {
+  timestamp: string;
+  count: number;
+};
+
+export type DlqActivityResponse = {
+  activity: DlqActivityRecord[];
+};
+
 export type DlqResponse = {
   total: number;
   messages: DlqRecord[];
@@ -165,6 +174,10 @@ export function getConsumerLag(): Promise<ConsumerLagResponse> {
 
 export function getDlqMessages(limit = 50, offset = 0): Promise<DlqResponse> {
   return apiFetch<DlqResponse>('/dlq/messages', { limit, offset });
+}
+
+export function getDlqActivity(hours = 24): Promise<DlqActivityResponse> {
+  return apiFetch<DlqActivityResponse>('/dlq/activity', { hours });
 }
 
 export function getConsumerStatus(): Promise<ConsumerStatusResponse> {
