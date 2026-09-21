@@ -144,6 +144,36 @@ async function apiFetch<T>(
 
   return response.json() as Promise<T>;
 }
+
+async function apiPost<T>(path: string): Promise<T> {
+  const response = await fetch(new URL(path, API_BASE_URL), {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`API ${response.status}: ${body || response.statusText}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export type ScenarioKey =
+  | 'normal-load'
+  | 'traffic-spike'
+  | 'malformed'
+  | 'slow-consumer'
+  | 'worker-failure';
+
+export type ScenarioStartResponse = {
+  status: 'started' | 'running';
+  scenario: ScenarioKey;
+};
+
+export function startScenario(scenario: ScenarioKey): Promise<ScenarioStartResponse> {
+  return apiPost<ScenarioStartResponse>(`/scenarios/${scenario}`);
+}
 export function getLogs(limit = 50, offset = 0): Promise<LogsResponse> {
   return apiFetch<LogsResponse>('/logs', { limit, offset });
 }

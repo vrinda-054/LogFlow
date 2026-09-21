@@ -61,9 +61,11 @@ function toConsumers(
   );
 
   const known = new Map<string, ConsumerView>();
-
   status.partitions.forEach((partition) => {
     const id = partition.assigned_consumer;
+    if (!['consumer-01', 'consumer-02', 'consumer-03'].includes(id)) {
+      return;
+    }
     const existing = known.get(id) ?? {
       id,
       status: 'RUNNING',
@@ -174,6 +176,31 @@ export default function ConsumersPage() {
     [status.partitions],
   );
 
+  const mainPartitions = useMemo(() => {
+    const mainConsumerIds = new Set([
+      'consumer-01',
+      'consumer-02',
+      'consumer-03',
+    ]);
+    const uniquePartitions = new Map<
+      number,
+      (typeof status.partitions)[number]
+    >();
+
+    status.partitions.forEach((partition) => {
+      if (
+        mainConsumerIds.has(partition.assigned_consumer) &&
+        !uniquePartitions.has(partition.partition)
+      ) {
+        uniquePartitions.set(partition.partition, partition);
+      }
+    });
+
+    return Array.from(uniquePartitions.values()).sort(
+      (first, second) => first.partition - second.partition,
+    );
+  }, [status.partitions]);
+
   const lagMap = useMemo(
     () =>
       new Map(
@@ -185,16 +212,23 @@ export default function ConsumersPage() {
     [lagData.partitions],
   );
 
+  const maxPartitionLag = Math.max(
+    0,
+    ...mainPartitions.map(
+      (partition) => Math.max(0, lagMap.get(partition.partition) ?? 0),
+    ),
+  );
+
   const activeConsumers = consumers.filter(
     (consumer) => consumer.status === 'RUNNING',
   ).length;
 
   const totalConsumers = consumers.length;
-  const totalPartitions = status.partitions.length;
+  const totalPartitions = mainPartitions.length;
 
   const totalThroughput = throughput.summary.current_rate;
 
-  const healthyPartitions = status.partitions.filter(
+  const healthyPartitions = mainPartitions.filter(
     (partition) => partition.health === 'HEALTHY',
   ).length;
 
@@ -282,194 +316,230 @@ export default function ConsumersPage() {
           </div>
         </div>
 
-        <div className="section-heading">
-          <h2>Consumer Instances</h2>
-          <span className="updating">
-            ● {isLive ? 'updating live' : 'connecting'}
-          </span>
-        </div>
-
-        <div className="three-cards consumer-instance-grid">
-          {consumers.map((consumer) => (
-            <article
-              key={consumer.id}
-              className={`consumer-card ${
-                consumer.status === 'PAUSED' ? 'paused-card' : ''
-              }`}
-            >
-              <div className="health-header">
-                <h3>● {consumer.id}</h3>
-
-                <span
-                  className={`status-tag ${
-                    consumer.status === 'RUNNING'
-                      ? 'running'
-                      : 'warning-tag'
-                  }`}
-                >
-                  {consumer.status}
-                </span>
-              </div>
-
-              {consumer.backpressure && (
-                <div className="backpressure-box">
-                  <strong>⚠ BACKPRESSURE ACTIVE</strong>
-                  <span>{consumer.backpressure}</span>
-                </div>
-              )}
-
-              <div className="consumer-body">
-                <div>
-                  <label>Consumer ID</label>
-                  <strong>{consumer.id}</strong>
-                </div>
-
-                <div>
-                  <label>Processing rate</label>
-                  <strong
-                    className={
-                      consumer.status === 'PAUSED'
-                        ? 'orange-text'
-                        : ''
-                    }
-                  >
-                    {consumer.rate.toFixed(2)} msg/s
-                  </strong>
-                </div>
-
-                <div>
-                  <label>Consumer lag</label>
-                  <strong
-                    className={
-                      consumer.lag > 1500
-                        ? 'danger-text'
-                        : ''
-                    }
-                  >
-                    {consumer.lag.toLocaleString()}
-                  </strong>
-                </div>
-
-                <div>
-                  <label>Heartbeat</label>
-                  <strong>{consumer.heartbeat}</strong>
-                </div>
-              </div>
-
-              <div className="partition-label">
-                PARTITIONS:{' '}
-                {consumer.partitions.length > 0
-                  ? consumer.partitions
-                      .map((partition) => `P${partition}`)
-                      .join('  ')
-                  : 'None'}
-              </div>
-
-              <div className="partition-assignment-label">
-                PARTITION ASSIGNMENT
-              </div>
-
-              {consumer.partitions.map((partition) => {
-                const lag = getPartitionLag(partition);
-
-                return (
-                  <div className="assignment-row" key={partition}>
-                    <span>P{partition}</span>
-
-                    <i
-                      className={
-                        lag !== null && lag > 1500
-                          ? 'critical'
-                          : ''
-                      }
-                      style={{
-                        width:
-                          lag === null
-                            ? '8%'
-                            : `${Math.min(
-                                100,
-                                Math.max(8, lag / 20),
-                              )}%`,
-                      }}
-                    />
-
-                    <b>
-                      Lag{' '}
-                      {lag === null
-                        ? '—'
-                        : lag.toLocaleString()}
-                    </b>
-                  </div>
-                );
-              })}
-            </article>
-          ))}
-        </div>
-
-        <section className="panel table-panel">
-          <div className="panel-title-row">
-            <div>
-              <h2>Kafka Partition Assignment</h2>
-              <p>Live partition-to-consumer mapping</p>
+        <div className="consumer-view-layout">
+          <div className="consumer-instance-list">
+            <div className="section-heading">
+              <h2>Consumer Instances</h2>
+              <span className="updating">
+                ● {isLive ? 'updating live' : 'connecting'}
+              </span>
             </div>
 
-            <span>
-              TOPIC <b className="topic-tag">logs</b>
-            </span>
-          </div>
+            {consumers.map((consumer, index) => (
+              <article
+                key={consumer.id}
+                className={`consumer-card consumer-row ${
+                  consumer.status === 'PAUSED' ? 'paused-card' : ''
+                }`}
+              >
+                <div className="consumer-number">
+                  {String(index + 1).padStart(2, '0')}
+                </div>
 
-          <table className="partition-table">
-            <thead>
-              <tr>
-                <th>PART.</th>
-                <th>THROUGHPUT</th>
-                <th>CURRENT LAG</th>
-                <th>CONSUMER</th>
-              </tr>
-            </thead>
+                <div className="consumer-identity">
+                  <div className="health-header">
+                    <div>
+                      <h3>● {consumer.id}</h3>
+                      <span className="consumer-subtitle">
+                        Main Consumer
+                      </span>
+                    </div>
 
-            <tbody>
-              {status.partitions.map((partition) => {
-                const lag = getPartitionLag(partition.partition);
+                    <span
+                      className={`status-tag ${
+                        consumer.status === 'RUNNING'
+                          ? 'running'
+                          : 'warning-tag'
+                      }`}
+                    >
+                      {consumer.status}
+                    </span>
+                  </div>
+                </div>
 
-                return (
-                  <tr
-                    key={partition.partition}
-                    className={
-                      selectedPartition === partition.partition
-                        ? 'selected-row'
-                        : ''
-                    }
-                    onClick={() =>
-                      setSelectedPartition(partition.partition)
-                    }
-                  >
-                    <td>P{partition.partition}</td>
+                {consumer.backpressure && (
+                  <div className="backpressure-box">
+                    <strong>⚠ BACKPRESSURE ACTIVE</strong>
+                    <span>{consumer.backpressure}</span>
+                  </div>
+                )}
 
-                    <td>
-                      {partition.throughput.toFixed(2)} msg/s
-                    </td>
-
-                    <td
+                <div className="consumer-body">
+                  <div>
+                    <label>Processing rate</label>
+                    <strong
                       className={
-                        lag !== null && lag > 1500
-                          ? 'danger-text'
-                          : 'healthy-text'
+                        consumer.status === 'PAUSED'
+                          ? 'orange-text'
+                          : ''
                       }
                     >
-                      Lag{' '}
-                      {lag === null
-                        ? '—'
-                        : lag.toLocaleString()}
-                    </td>
+                      {consumer.rate.toFixed(2)} msg/s
+                    </strong>
+                  </div>
 
-                    <td>{partition.assigned_consumer}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </section>
+                  <div>
+                    <label>Consumer lag</label>
+                    <strong
+                      className={
+                        consumer.lag > 1500
+                          ? 'danger-text'
+                          : ''
+                      }
+                    >
+                      {consumer.lag.toLocaleString()}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <label>Heartbeat</label>
+                    <strong>{consumer.heartbeat}</strong>
+                  </div>
+                </div>
+
+                <div className="partition-label consumer-partitions">
+                  <label>Partitions</label>
+                  <div className="partition-chips">
+                    {consumer.partitions.length > 0 ? (
+                      consumer.partitions.map((partition) => (
+                        <span
+                          className={`partition-chip partition-chip-${partition}`}
+                          key={partition}
+                        >
+                          P{partition}
+                        </span>
+                      ))
+                    ) : (
+                      <span>None</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="consumer-assignment">
+                  <div className="partition-assignment-label">
+                    PARTITION ASSIGNMENT
+                  </div>
+
+                  {consumer.partitions.map((partition) => {
+                    const lag = getPartitionLag(partition);
+
+                    return (
+                      <div className="assignment-row" key={partition}>
+                        <span>P{partition}</span>
+
+                        <i
+                          className={`assignment-indicator assignment-partition-${partition} ${
+                            lag !== null && lag > 1500
+                              ? 'critical'
+                              : ''
+                          }`}
+                          style={{
+                            width:
+                              lag === null
+                                ? '8%'
+                                : `${Math.min(
+                                    100,
+                                    Math.max(8, lag / 20),
+                                  )}%`,
+                          }}
+                        />
+
+                        <b>
+                          Lag{' '}
+                          {lag === null
+                            ? '—'
+                            : lag.toLocaleString()}
+                        </b>
+                      </div>
+                    );
+                  })}
+                </div>
+              </article>
+            ))}
+          </div>
+
+          <section className="panel table-panel partition-assignment-panel">
+            <div className="panel-title-row">
+              <div>
+                <h2>Kafka Partition Assignment</h2>
+                <p>Live partition-to-consumer mapping</p>
+              </div>
+
+              <span className="topic-control">
+                <span>TOPIC</span>
+                <b className="topic-tag">LOGS</b>
+              </span>
+            </div>
+
+            <table className="partition-table">
+              <thead>
+                <tr>
+                  <th>PART.</th>
+                  <th>THROUGHPUT</th>
+                  <th>CURRENT LAG</th>
+                  <th>CONSUMER</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {status.partitions
+                  .filter(
+                    (partition) =>
+                      partition.assigned_consumer !== 'dlq-fast' &&
+                      partition.assigned_consumer !== 'dlq-test',
+                  )
+                  .map((partition, index) => {
+                    const lag = getPartitionLag(partition.partition);
+
+                  return (
+                    <tr
+                      key={`${partition.partition}-${partition.assigned_consumer}-${index}`}
+                      className={
+                        selectedPartition === partition.partition
+                          ? 'selected-row'
+                          : ''
+                      }
+                      onClick={() =>
+                        setSelectedPartition(partition.partition)
+                      }
+                    >
+                      <td>
+                        <span
+                          className={`partition-badge partition-chip-${partition.partition}`}
+                        >
+                          P{partition.partition}
+                        </span>
+                      </td>
+
+                      <td>
+                        {partition.throughput.toFixed(2)} msg/s
+                      </td>
+
+                      <td
+                        className={
+                          lag !== null && lag > 1500
+                            ? 'danger-text'
+                            : 'healthy-text'
+                        }
+                      >
+                        Lag{' '}
+                        {lag === null
+                          ? '—'
+                          : lag.toLocaleString()}
+                      </td>
+
+                      <td>
+                        <span className="consumer-badge">
+                          {partition.assigned_consumer}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                  })}
+              </tbody>
+            </table>
+          </section>
+        </div>
 
         <div className="lower-split">
           <section className="panel consumer-lag-panel">
@@ -485,7 +555,7 @@ export default function ConsumersPage() {
             </div>
 
             <div className="partition-rows">
-              {status.partitions.map((partition) => {
+              {mainPartitions.map((partition) => {
                 const lag = getPartitionLag(partition.partition);
 
                 return (
@@ -503,15 +573,17 @@ export default function ConsumersPage() {
                   >
                     <span>P{partition.partition}</span>
 
-                    <i className="lag-track">
+                    <i
+                      className={`lag-track lag-partition-${partition.partition}`}
+                    >
                       <b
                         style={{
                           width:
-                            lag === null
-                              ? '5%'
+                            lag === null || maxPartitionLag === 0
+                              ? '0%'
                               : `${Math.min(
                                   100,
-                                  Math.max(5, lag / 20),
+                                  (Math.max(0, lag) / maxPartitionLag) * 100,
                                 )}%`,
                         }}
                       />

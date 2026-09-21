@@ -57,6 +57,8 @@ Consumed by
 import os
 import logging
 import json
+import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -94,7 +96,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -102,6 +104,49 @@ app.add_middleware(
 # ═══════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+_scenario_processes: dict[str, subprocess.Popen] = {}
+_producer_scenarios = {
+    "normal-load": ["--rate", "10", "--duration", "120", "--scenario", "normal"],
+    "traffic-spike": ["--rate", "10", "--duration", "300", "--scenario", "spike"],
+    "malformed": [
+        "--rate", "10", "--duration", "120", "--malformed-pct", "30",
+        "--scenario", "malformed",
+    ],
+}
+
+
+@app.post("/scenarios/{scenario}", tags=["scenarios"])
+def start_scenario(scenario: str):
+    """Start one of the repository's fixed producer scenario presets."""
+    if scenario not in {"normal-load", "traffic-spike", "malformed", "slow-consumer", "worker-failure"}:
+        raise HTTPException(status_code=404, detail="Unknown scenario")
+
+    if scenario in {"slow-consumer", "worker-failure"}:
+        raise HTTPException(
+            status_code=501,
+            detail="This scenario is currently documented as a Docker Compose operation and has no API mechanism.",
+        )
+
+    process = _scenario_processes.get(scenario)
+    if process is not None and process.poll() is None:
+        return {"status": "running", "scenario": scenario}
+
+    producer_path = PROJECT_ROOT / "ingestion" / "producer.py"
+    try:
+        _scenario_processes[scenario] = subprocess.Popen(
+            [sys.executable, str(producer_path), *_producer_scenarios[scenario]],
+            cwd=PROJECT_ROOT,
+            env=os.environ.copy(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError as exc:
+        logger.exception("Unable to start scenario %s", scenario)
+        raise HTTPException(status_code=503, detail=f"Unable to start scenario: {exc}") from exc
+
+    return {"status": "started", "scenario": scenario}
 
 
 @app.get("/health", tags=["infra"])

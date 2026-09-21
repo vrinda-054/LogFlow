@@ -1,147 +1,281 @@
 import { useEffect, useState } from 'react';
+import {
+  getConsumerLag,
+  getConsumerStatus,
+  getDlqActivity,
+  getDlqMessages,
+  getHealth,
+  startScenario,
+  type ScenarioKey,
+  getThroughput,
+  type ConsumerLagResponse,
+  type ConsumerStatusResponse,
+  type DlqActivityResponse,
+  type DlqResponse,
+  type HealthResponse,
+  type ThroughputResponse,
+} from '../api';
 import DashboardShell from '../components/DashboardShell';
 
-type ScenarioStatus = 'READY' | 'RUNNING' | 'PASSED' | 'STOPPED';
-
-type ScenarioState = {
-  status: ScenarioStatus;
-  name: string;
-  elapsed: number;
-  throughput: number;
-  lag: number;
-  generated: number;
-  processed: number;
-  errors: number;
-  dlq: number;
-  selectedConsumer: string;
+type LiveScenarioData = {
+  throughput: ThroughputResponse | null;
+  lag: ConsumerLagResponse | null;
+  consumers: ConsumerStatusResponse | null;
+  dlq: DlqResponse | null;
+  activity: DlqActivityResponse | null;
+  health: HealthResponse | null;
+  error: string | null;
 };
 
-const initialState: ScenarioState = {
-  status: 'RUNNING',
-  name: 'Slow Consumer',
-  elapsed: 22,
-  throughput: 892,
-  lag: 1869,
-  generated: 26760,
-  processed: 24918,
-  errors: 0,
-  dlq: 0,
-  selectedConsumer: 'Consumer 3',
+const emptyData: LiveScenarioData = {
+  throughput: null,
+  lag: null,
+  consumers: null,
+  dlq: null,
+  activity: null,
+  health: null,
+  error: null,
 };
 
 const scenarioCards = [
-  { name: 'Normal Load', tag: 'BASELINE', description: 'Verify correct processing under steady traffic.', metrics: ['Message rate|1000|msg/s', 'Duration|30|seconds'], expected: 'Stable throughput · low consumer lag', action: 'START TEST', tone: 'normal' },
-  { name: 'Traffic Spike', tag: 'LOAD TEST', description: 'Generate a sudden increase in traffic and observe Kafka buffering and consumer lag.', metrics: ['Spike rate|5000|msg/s', 'Duration|30|seconds', 'Ramp-up|Immediate|'], expected: 'Kafka buffers incoming traffic · consumer lag increases · pipeline recovers after spike', action: 'INJECT SPIKE', tone: 'spike' },
-  { name: 'Slow Consumer', tag: 'BACKPRESSURE', description: 'Artificially delay a consumer to demonstrate lag-based backpressure.', metrics: ['Target consumer|Consumer 3|', 'Processing delay|500|ms/msg', 'Trigger threshold|1500|messages'], expected: 'Consumer slows → lag increases → HW threshold exceeded → consumption paused', action: 'STOP TEST', tone: 'slow' },
-  { name: 'Malformed Log Injection', tag: 'FAULT INJECTION', description: 'Inject malformed messages to verify retry and Dead Letter Queue handling.', metrics: ['Malformed %|10|%', 'Message rate|1000|msg/s', 'Duration|30|seconds'], expected: 'Message → failed messages → retries → DLQ', action: 'INJECT MALFORMED LOGS', tone: 'failure' },
+  { key: 'normal-load' as ScenarioKey, name: 'Normal Load', tag: 'BASELINE', description: 'Run the pipeline under normal traffic and verify stable processing.', expected: 'Consumers process messages normally with stable lag.', tone: 'normal' },
+  { key: 'traffic-spike' as ScenarioKey, name: 'Traffic Spike', tag: 'LOAD TEST', description: 'Generate a sudden increase in traffic and observe consumer backpressure.', expected: 'Consumer lag may increase and partitions may pause/resume under backpressure.', tone: 'spike' },
+  { key: 'malformed' as ScenarioKey, name: 'Malformed Logs', tag: 'DLQ TEST', description: 'Send malformed log messages and verify that invalid messages are routed to the DLQ.', expected: 'Invalid messages are isolated in the dead-letter queue.', tone: 'failure' },
+  { key: 'slow-consumer' as ScenarioKey, name: 'Slow Consumer', tag: 'BACKPRESSURE', description: 'Simulate a slow consumer and observe consumer lag and backpressure.', expected: 'Consumer lag and backpressure are observable in live consumer metrics.', tone: 'slow' },
+  { key: 'worker-failure' as ScenarioKey, name: 'Worker Failure', tag: 'FAILURE TEST', description: 'Simulate worker failure and verify Kafka consumer-group rebalancing.', expected: 'Partitions are reassigned after worker failure.', tone: 'failure' },
 ];
 
-const recentRuns = [
-  ['Slow Consumer', '18:47', '30s', '892 msg/s', '1,842', '0', '0', 'RUNNING'],
-  ['Traffic Spike', '18:42', '30s', '4,823 msg/s', '2,431', '0', '0', 'PASSED'],
-  ['Malformed Logs', '18:35', '30s', '1,002 msg/s', '182', '127', '127', 'PASSED'],
-  ['Worker Failure', '18:27', '45s', '2,184 msg/s', '913', '0', '0', 'PASSED'],
-];
+function formatFailureReason(reason: string | undefined): string {
+  const normalized = reason?.toLowerCase() ?? '';
+
+  if (
+    normalized.includes('unknown_severity') ||
+    normalized.includes('unknown-severity') ||
+    normalized.includes('invalid severity') ||
+    normalized.includes('severity enum')
+  ) {
+    return 'Invalid severity';
+  }
+
+  if (
+    normalized.includes('invalid-trace-id') ||
+    normalized.includes('invalid trace id') ||
+    normalized.includes('trace_id') && normalized.includes('invalid')
+  ) {
+    return 'Invalid trace ID';
+  }
+
+  if (normalized.includes('missing-service') || normalized.includes('missing service')) {
+    return 'Missing service';
+  }
+
+  if (
+    normalized.includes('missing required') ||
+    normalized.includes('required field')
+  ) {
+    return 'Missing required field';
+  }
+
+  if (
+    normalized.includes('message-object') ||
+    normalized.includes('message object') ||
+    normalized.includes('malformed message') ||
+    normalized.includes('message schema')
+  ) {
+    return 'Malformed message';
+  }
+
+  return 'Schema validation failed';
+}
 
 export default function TestScenariosPage() {
-  const [state, setState] = useState(initialState);
+  const [data, setData] = useState(emptyData);
+  const [lastUpdated, setLastUpdated] = useState('not yet');
+  const [scenarioStatus, setScenarioStatus] = useState<Record<ScenarioKey, 'READY' | 'STARTING' | 'RUNNING' | 'FAILED'>>({
+    'normal-load': 'READY',
+    'traffic-spike': 'READY',
+    malformed: 'READY',
+    'slow-consumer': 'READY',
+    'worker-failure': 'READY',
+  });
+  const [scenarioError, setScenarioError] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (state.status !== 'RUNNING') return undefined;
-    const timer = window.setInterval(() => setState((current) => ({
-      ...current,
-      elapsed: Math.min(30, current.elapsed + 1),
-      throughput: current.throughput + 18,
-      lag: current.lag + 11,
-      generated: current.generated + current.throughput,
-      processed: current.processed + Math.max(0, current.throughput - 11),
-    })), 1000);
+    const refresh = async () => {
+      const [throughput, lag, consumers, dlq, activity, health] =
+        await Promise.allSettled([
+          getThroughput(5),
+          getConsumerLag(),
+          getConsumerStatus(),
+          getDlqMessages(10),
+          getDlqActivity(24),
+          getHealth(),
+        ]);
+
+      const firstError = [throughput, lag, consumers, dlq, activity, health]
+        .find((result) => result.status === 'rejected');
+
+      setData({
+        throughput: throughput.status === 'fulfilled' ? throughput.value : null,
+        lag: lag.status === 'fulfilled' ? lag.value : null,
+        consumers: consumers.status === 'fulfilled' ? consumers.value : null,
+        dlq: dlq.status === 'fulfilled' ? dlq.value : null,
+        activity: activity.status === 'fulfilled' ? activity.value : null,
+        health: health.status === 'fulfilled' ? health.value : null,
+        error: firstError?.status === 'rejected'
+          ? firstError.reason instanceof Error
+            ? firstError.reason.message
+            : 'Live scenario metrics unavailable'
+          : null,
+      });
+      setLastUpdated(new Date().toLocaleTimeString());
+    };
+
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
-  }, [state.status]);
+  }, []);
 
-  const startScenario = (name: string) => setState((current) => ({
-    ...current,
-    status: 'RUNNING',
-    name,
-    elapsed: 0,
-    throughput: name === 'Traffic Spike' ? 4823 : name === 'Normal Load' ? 1000 : 892,
-    lag: name === 'Slow Consumer' ? 420 : 182,
-    generated: 0,
-    processed: 0,
-    errors: name === 'Malformed Log Injection' ? 127 : 0,
-    dlq: name === 'Malformed Log Injection' ? 127 : 0,
-  }));
+  const throughput = data.throughput?.summary.current_rate;
+  const totalLag = data.lag?.total_lag;
+  const consumerStatus = data.consumers?.consumer.status;
+  const rebalanceState = data.consumers?.rebalancing.state;
+  const latestFailure = formatFailureReason(data.dlq?.messages[0]?.failure_reason);
+  const dlqActivityCount = data.activity?.activity.reduce(
+    (total, item) => total + item.count,
+    0,
+  );
+  const liveStatus = data.health?.status === 'ok' || data.health?.status === 'healthy'
+    ? 'ONLINE'
+    : data.health?.status?.toUpperCase() ?? 'NOT AVAILABLE';
 
-  const reset = () => setState({ ...initialState, status: 'READY', elapsed: 0 });
-  const stop = () => setState((current) => ({ ...current, status: 'STOPPED' }));
-  const inject = (name: string) => setState((current) => ({
-    ...current,
-    status: 'RUNNING',
-    name,
-    errors: name === 'Malformed Log Injection' ? current.errors + 35 : current.errors + 8,
-    dlq: name === 'Malformed Log Injection' ? current.dlq + 16 : current.dlq,
-    lag: current.lag + 600,
-  }));
+  const refreshLiveData = async () => {
+    const [throughputResult, lagResult, consumersResult, dlqResult, activityResult, healthResult] =
+      await Promise.allSettled([
+        getThroughput(5),
+        getConsumerLag(),
+        getConsumerStatus(),
+        getDlqMessages(10),
+        getDlqActivity(24),
+        getHealth(),
+      ]);
+
+    setData({
+      throughput: throughputResult.status === 'fulfilled' ? throughputResult.value : data.throughput,
+      lag: lagResult.status === 'fulfilled' ? lagResult.value : data.lag,
+      consumers: consumersResult.status === 'fulfilled' ? consumersResult.value : data.consumers,
+      dlq: dlqResult.status === 'fulfilled' ? dlqResult.value : data.dlq,
+      activity: activityResult.status === 'fulfilled' ? activityResult.value : data.activity,
+      health: healthResult.status === 'fulfilled' ? healthResult.value : data.health,
+      error: null,
+    });
+    setLastUpdated(new Date().toLocaleTimeString());
+  };
+
+  const runScenario = async (scenario: ScenarioKey) => {
+    setScenarioError((current) => ({ ...current, [scenario]: '' }));
+    setScenarioStatus((current) => ({ ...current, [scenario]: 'STARTING' }));
+
+    try {
+      await startScenario(scenario);
+      setScenarioStatus((current) => ({ ...current, [scenario]: 'RUNNING' }));
+      await refreshLiveData();
+    } catch (requestError) {
+      setScenarioStatus((current) => ({ ...current, [scenario]: 'FAILED' }));
+      setScenarioError((current) => ({
+        ...current,
+        [scenario]: requestError instanceof Error
+          ? requestError.message
+          : 'Failed to start scenario',
+      }));
+    }
+  };
 
   return (
     <DashboardShell>
       <div className="page-frame scenario-page test-scenarios-page">
         <header className="page-header">
           <div><h1>Scenario Control Panel</h1><p>Run controlled load and fault-injection experiments against the LogFlow pipeline</p></div>
-          <div className="header-actions"><span className="status-header">TEST ENVIRONMENT</span><span className="pill live">● READY</span><span className="pill muted">Last test: Traffic Spike — 18:42</span></div>
+          <div className="header-actions"><span className="status-header">TEST ENVIRONMENT</span><span className="pill live">● {liveStatus}</span><span className="pill muted">Updated {lastUpdated}</span></div>
         </header>
 
         <section className="scenario-toolbar scenario-status-banner">
-          <span className="status-tag warning">● TEST {state.status}</span>
-          <span>{state.name} scenario in progress — {state.selectedConsumer}</span>
-          <span className="status-tag healthy">Kafka <strong>ONLINE</strong></span>
-          <span className="status-tag healthy">Consumers <strong>3 / 3 ACTIVE</strong></span>
-          <span className="status-tag healthy">API <strong>ONLINE</strong></span>
-          <span className="status-tag healthy">Database <strong>ONLINE</strong></span>
+          <span className="status-tag info">● NO SCENARIO RUNNING</span>
+          <span>Scenario controls are ready; no execution endpoint is available.</span>
+          <span className="status-tag healthy">Kafka <strong>{liveStatus}</strong></span>
+          <span className="status-tag healthy">Consumers <strong>{consumerStatus ?? 'NOT AVAILABLE'}</strong></span>
+          <span className="status-tag healthy">API <strong>{data.health ? 'ONLINE' : 'NOT AVAILABLE'}</strong></span>
+          <span className="status-tag healthy">Database <strong>{data.health?.database?.toUpperCase() ?? 'NOT AVAILABLE'}</strong></span>
           <button className="small-btn" onClick={() => window.location.assign('/')}>View Dashboard</button>
         </section>
 
-        <section className={`panel active-scenario ${state.status === 'RUNNING' ? 'scenario-running' : ''}`}>
-          <div className="panel-title-row"><span>● ACTIVE TEST &nbsp; {state.name.toUpperCase()} <span className="scenario-badge">{state.status}</span></span><button className="danger-button" onClick={stop}>■ STOP TEST</button></div>
-          <div className="scenario-progress-label"><span>ELAPSED</span><strong>{String(state.elapsed).padStart(2, '0')}s / 00:30</strong></div>
-          <div className="progress-track"><i style={{ width: `${Math.min(100, state.elapsed / 30 * 100)}%` }} /></div>
+        <section className="panel active-scenario">
+          <div className="panel-title-row"><span>● LIVE SYSTEM OBSERVATION <span className="scenario-badge">READY</span></span></div>
           <div className="active-scenario-layout">
             <div>
-              <div className="active-meta"><span>Target Consumer: {state.selectedConsumer}</span><span>Processing Delay: 500ms/msg</span></div>
+              <div className="active-meta"><span>Scenario execution: Not available</span><span>Updated: {lastUpdated}</span></div>
               <div className="active-metrics">
                 {[
-                  ['CURRENT RATE', `${state.throughput} msg/s`], ['CONSUMER LAG', state.lag.toLocaleString()], ['MSGS GENERATED', state.generated.toLocaleString()],
-                  ['MSGS PROCESSED', state.processed.toLocaleString()], ['ERRORS', String(state.errors)], ['DLQ', String(state.dlq)],
+                  ['CURRENT RATE', throughput === undefined ? 'Not available' : `${throughput.toFixed(2)} msg/s`],
+                  ['CONSUMER LAG', totalLag === undefined ? 'Not available' : totalLag.toLocaleString()],
+                  ['CONSUMER STATUS', consumerStatus ?? 'Not available'],
+                  ['REBALANCING', rebalanceState ?? 'Not available'],
+                  ['DLQ MESSAGES', data.dlq ? data.dlq.total.toLocaleString() : 'Not available'],
+                  ['DLQ ACTIVITY', dlqActivityCount === undefined ? 'Not available' : dlqActivityCount.toLocaleString()],
                 ].map(([label, value]) => <div key={label}><label>{label}</label><strong>{value}</strong></div>)}
               </div>
             </div>
-            <div className="system-response"><label>LIVE SYSTEM RESPONSE</label><p>18:47:02 &nbsp; <strong>Slow consumer test started — {state.selectedConsumer}</strong></p><p>18:47:03 &nbsp; Processing delay applied: 500ms/message</p><p>18:47:09 &nbsp; Consumer lag increasing: 412</p><p className="orange-text">18:47:19 &nbsp; High-water threshold exceeded: 1,842 &gt; 1,500</p><p className="danger-text">18:47:20 &nbsp; Backpressure ACTIVE — consumption PAUSED</p></div>
+            <div className="system-response"><label>LIVE SYSTEM RESPONSE</label><p>{data.error ?? 'Live metrics loaded from the LogFlow API.'}</p><p>Expected scenario outcomes are descriptive only.</p></div>
           </div>
         </section>
 
         <div className="scenario-section-heading"><h2>Test Scenarios</h2><span>Configure parameters and inject conditions below</span></div>
         <div className="scenario-grid scenario-card-grid">
           {scenarioCards.map((card) => (
-            <section key={card.name} className={`scenario-card detailed-scenario-card ${card.tone === 'slow' && state.status === 'RUNNING' ? 'active' : ''}`}>
-              <div className="scenario-head"><span>{card.name}</span><span className="scenario-status">{card.tone === 'slow' && state.status === 'RUNNING' ? '● RUNNING' : 'READY'}</span></div>
+            <section key={card.name} className="scenario-card detailed-scenario-card">
+              <div className="scenario-head"><span>{card.name}</span><span className="scenario-status">{scenarioStatus[card.key]}</span></div>
               <span className={`scenario-badge ${card.tone}`}>{card.tag}</span>
               <p>{card.description}</p>
-              <div className="scenario-inputs">{card.metrics.map((metric) => { const [label, value, suffix] = metric.split('|'); return <div key={label}><label>{label}</label><strong>{value}</strong><small>{suffix}</small></div>; })}</div>
+              <div className="scenario-inputs">
+                {card.name === 'Malformed Logs' ? (
+                  <>
+                    <div><label>DLQ MESSAGES</label><strong>{data.dlq?.total.toLocaleString() ?? 'Not available'}</strong></div>
+                    <div><label>RECENT FAILURE</label><strong>{latestFailure ?? 'Not available'}</strong></div>
+                    <div><label>DLQ ACTIVITY</label><strong>{dlqActivityCount?.toLocaleString() ?? 'Not available'}</strong></div>
+                  </>
+                ) : (
+                  <>
+                    <div><label>THROUGHPUT</label><strong>{throughput === undefined ? 'Not available' : `${throughput.toFixed(2)} msg/s`}</strong></div>
+                    <div><label>CONSUMER LAG</label><strong>{totalLag === undefined ? 'Not available' : totalLag.toLocaleString()}</strong></div>
+                    <div><label>CONSUMER STATUS</label><strong>{consumerStatus ?? 'Not available'}</strong></div>
+                  </>
+                )}
+              </div>
               <div className={`expected-text ${card.tone}`}>{card.expected}</div>
-              <div className="scenario-actions"><button className={`scenario-btn ${card.tone}`} onClick={() => (card.tone === 'slow' ? stop() : inject(card.name))}>{card.action}</button><button className="small-btn" onClick={reset}>Reset</button></div>
+              <div className="scenario-actions">
+                <button
+                  className={`scenario-btn ${card.tone}`}
+                  disabled={scenarioStatus[card.key] === 'STARTING'}
+                  onClick={() => void runScenario(card.key)}
+                >
+                  {scenarioStatus[card.key] === 'STARTING'
+                    ? 'STARTING...'
+                    : scenarioStatus[card.key] === 'RUNNING'
+                      ? 'RUNNING'
+                      : scenarioStatus[card.key] === 'FAILED'
+                        ? 'RETRY'
+                        : 'READY TO RUN'}
+                </button>
+              </div>
+              {scenarioError[card.key] && (
+                <small className="danger-text">{scenarioError[card.key]}</small>
+              )}
             </section>
           ))}
-          <section className="scenario-card detailed-scenario-card worker-failure-card">
-            <div className="scenario-head"><span>⚙ Worker Failure</span><span className="scenario-status">READY</span></div>
-            <span className="scenario-badge failure">FAILURE TEST</span><p>Stop a consumer and verify Kafka consumer-group rebalancing.</p>
-            <div className="failure-warning">◉ This will intentionally stop the selected consumer.</div>
-            <div className="failure-grid"><div><label>TARGET CONSUMER</label><select value={state.selectedConsumer} onChange={(event) => setState((current) => ({ ...current, selectedConsumer: event.target.value }))}><option>Consumer 1</option><option>Consumer 2</option><option>Consumer 3</option></select></div><div><label>BEFORE → AFTER REBALANCE</label><p>P0 → C1<br />P1 → C2<br />P2 → C3</p></div><div><label>FLOW</label><p className="danger-text">C2 STOPPED<br /><span className="orange-text">REBALANCING</span><br /><span className="live-text">GROUP STABLE</span></p></div></div>
-            <button className="danger-button" onClick={() => inject('Worker Failure')}>⚠ KILL CONSUMER</button>
-          </section>
         </div>
 
-        <section className="panel recent-runs"><div className="panel-title-row"><span>◉ Recent Test Runs</span><button className="small-btn">View all ↗</button></div><table><thead><tr><th>SCENARIO</th><th>STARTED</th><th>DURATION</th><th>PEAK RATE</th><th>PEAK LAG</th><th>ERRORS</th><th>DLQ</th><th>RESULT</th></tr></thead><tbody>{recentRuns.map((run) => <tr key={run[0]}>{run.map((value, index) => <td key={`${run[0]}-${index}`} className={index === 7 ? value.toLowerCase() : ''}>{value}</td>)}</tr>)}</tbody></table></section>
-        <p className="scenario-footnote">⚙ Test Environment — These controls intentionally generate load and failure conditions. Use only against the LogFlow test environment.</p>
+        <section className="panel recent-runs"><div className="panel-title-row"><span>LIVE SCENARIO DATA</span></div><p className="empty-state">No scenario execution history is exposed by the current API.</p></section>
+        <p className="scenario-footnote">Test execution results are unavailable until a scenario control endpoint is provided.</p>
       </div>
     </DashboardShell>
   );

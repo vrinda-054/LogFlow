@@ -85,20 +85,20 @@ export default function OverviewPage() {
     {
       id: 'C1',
       status: consumerStatus.consumer.status || 'RUNNING',
-      rate: `${consumerStatus.partitions.filter(p => p.assigned_consumer.includes('1') || p.assigned_consumer.includes('C1')).reduce((a, c) => a + c.throughput, 0) || 742}/s`,
-      lag: `${consumerStatus.partitions.filter(p => p.assigned_consumer.includes('1') || p.assigned_consumer.includes('C1')).reduce((a, c) => a + c.current_lag, 0) || 124}`,
+      rate: `${(consumerStatus.partitions.filter(p => p.assigned_consumer.includes('1') || p.assigned_consumer.includes('C1')).reduce((a, c) => a + c.throughput, 0) || 742).toFixed(2)} msg/s`,
+      lag: (consumerStatus.partitions.filter(p => p.assigned_consumer.includes('1') || p.assigned_consumer.includes('C1')).reduce((a, c) => a + c.current_lag, 0) || 124).toLocaleString(),
     },
     {
       id: 'C2',
       status: 'RUNNING',
-      rate: `${consumerStatus.partitions.filter(p => p.assigned_consumer.includes('2') || p.assigned_consumer.includes('C2')).reduce((a, c) => a + c.throughput, 0) || 811}/s`,
-      lag: `${consumerStatus.partitions.filter(p => p.assigned_consumer.includes('2') || p.assigned_consumer.includes('C2')).reduce((a, c) => a + c.current_lag, 0) || 87}`,
+      rate: `${(consumerStatus.partitions.filter(p => p.assigned_consumer.includes('2') || p.assigned_consumer.includes('C2')).reduce((a, c) => a + c.throughput, 0) || 811).toFixed(2)} msg/s`,
+      lag: (consumerStatus.partitions.filter(p => p.assigned_consumer.includes('2') || p.assigned_consumer.includes('C2')).reduce((a, c) => a + c.current_lag, 0) || 87).toLocaleString(),
     },
     {
       id: 'C3',
       status: 'RUNNING',
-      rate: `${consumerStatus.partitions.filter(p => p.assigned_consumer.includes('3') || p.assigned_consumer.includes('C3')).reduce((a, c) => a + c.throughput, 0) || 631}/s`,
-      lag: `${consumerStatus.partitions.filter(p => p.assigned_consumer.includes('3') || p.assigned_consumer.includes('C3')).reduce((a, c) => a + c.current_lag, 0) || 131}`,
+      rate: `${(consumerStatus.partitions.filter(p => p.assigned_consumer.includes('3') || p.assigned_consumer.includes('C3')).reduce((a, c) => a + c.throughput, 0) || 631).toFixed(2)} msg/s`,
+      lag: (consumerStatus.partitions.filter(p => p.assigned_consumer.includes('3') || p.assigned_consumer.includes('C3')).reduce((a, c) => a + c.current_lag, 0) || 131).toLocaleString(),
     },
   ] : defaultConsumerCards;
 

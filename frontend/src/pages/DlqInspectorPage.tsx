@@ -23,6 +23,39 @@ function toViewMessage(record: DlqRecord): ViewMessage {
   };
 }
 
+function formatFailureReason(reason: string | undefined): string {
+  const normalized = reason?.toLowerCase() ?? '';
+
+  if (normalized.includes('invalid-trace-id-with-hyphens-and-too-short')) {
+    return 'Invalid trace ID';
+  }
+
+  if (normalized.includes('missing-service')) {
+    return 'Missing service';
+  }
+
+  if (normalized.includes('message-object')) {
+    return 'Invalid message format';
+  }
+
+  if (normalized.includes('unknown-severity')) {
+    return 'Unknown severity';
+  }
+
+  const readable = (reason ?? 'Unknown failure')
+    .replace(/[{}[\]"']/g, ' ')
+    .split(/schema validation|validation error|details?:/i)[0]
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!readable || readable.length > 48) {
+    return 'Processing validation error';
+  }
+
+  return readable.charAt(0).toUpperCase() + readable.slice(1);
+}
+
 export default function DlqInspectorPage() {
   const [messages, setMessages] = useState<ViewMessage[]>([]);
   const [activity, setActivity] = useState<DlqActivityRecord[]>([]);
@@ -104,7 +137,7 @@ export default function DlqInspectorPage() {
           <div className="metric-box danger-metric"><strong>{total}</strong><b>Total Failed Messages</b><span>in DLQ</span></div>
           <div className="metric-box danger-metric"><strong>{failedToday}</strong><b>Failed Today</b><span>from loaded messages</span></div>
           <div className="metric-box warning-metric"><strong>{averageRetryCount?.toFixed(1) ?? '—'}</strong><b>Average Retry Count</b><span>from loaded messages</span></div>
-          <div className="metric-box reason-metric"><strong>{failureReasonCounts[0]?.[0] ?? '—'}</strong><b>Top Failure Reason</b><span>{failureReasonCounts[0]?.[1] ?? 0} occurrences</span></div>
+          <div className="metric-box reason-metric"><strong>{formatFailureReason(failureReasonCounts[0]?.[0])}</strong><b>Top Failure Reason</b><span>{failureReasonCounts[0]?.[1] ?? 0} occurrences</span></div>
         </div>
 
         <div className="filter-bar screenshot-filters">

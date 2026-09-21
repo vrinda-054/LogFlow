@@ -133,6 +133,13 @@ button { cursor: pointer; }
 .health-metrics div { display: flex; flex-direction: column; gap: 6px; }
 .health-metrics strong { font-size: 1.8rem; }
 .health-metrics span { color: var(--muted); font-size: 0.62rem; }
+.overview-page .health-metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+}
+.overview-page .health-metrics strong { white-space: nowrap; }
+.overview-page .health-metrics div { min-width: 0; }
 .event-list { display: flex; flex-direction: column; gap: 6px; font-size: 0.7rem; list-style: none; padding: 0; margin: 0; }
 .event-list li { display: flex; gap: 12px; align-items: center; color: #dbe8f9; }
 .event-time { color: var(--muted); width: 58px; }
@@ -204,6 +211,15 @@ button { cursor: pointer; }
 .partition-rows { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 .partition-item { display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: center; background: rgba(255,255,255,0.02); border: 1px solid transparent; border-radius: 8px; padding: 10px 12px; }
 .partition-item span { color: var(--muted); }
+.consumer-lag-panel .partition-item {
+  width: 100%;
+  grid-template-columns: 26px minmax(0, 1fr) minmax(84px, auto);
+}
+.consumer-lag-panel .partition-item strong {
+  min-width: 84px;
+  white-space: nowrap;
+  overflow: visible;
+}
 .mini-bar { display: block; height: 12px; border-radius: 999px; }
 .mini-bar.green { background: linear-gradient(90deg, #b8ff58, #d6ff80); }
 .mini-bar.red { background: linear-gradient(90deg, #ff7d79, #ff5f5d); }
@@ -454,4 +470,488 @@ button { cursor: pointer; }
   height: 100%;
   background: #ff4d5d;
   border-radius: 4px;
+}
+
+/* Consumer & Partition View layout refinements. Existing theme colors remain unchanged. */
+.consumer-view-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(360px, .85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.consumer-instance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.consumer-row {
+  display: grid;
+  grid-template-columns: 48px minmax(150px, 1.05fr) minmax(230px, 1.45fr) minmax(120px, .7fr) minmax(190px, 1fr);
+  gap: 16px;
+  align-items: center;
+  min-height: 178px;
+  padding: 28px 22px;
+}
+
+.consumer-number {
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: .72rem;
+  letter-spacing: .08rem;
+}
+
+.consumer-identity,
+.consumer-assignment {
+  min-width: 0;
+}
+
+.consumer-identity .health-header {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.consumer-subtitle {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: .62rem;
+}
+
+.consumer-row .consumer-body {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 0;
+}
+
+.consumer-row .consumer-body strong {
+  font-size: .9rem;
+  white-space: nowrap;
+}
+
+.consumer-partitions {
+  margin-top: 0;
+}
+
+.consumer-partitions > label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: .6rem;
+  letter-spacing: .1rem;
+  text-transform: uppercase;
+}
+
+.partition-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.partition-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  padding: 4px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: .58rem;
+  font-weight: 700;
+}
+
+.partition-chip-0 { color: var(--cyan); background: rgba(112,211,255,.08); }
+.partition-chip-1 { color: var(--warning); background: rgba(255,183,77,.08); }
+.partition-chip-2 { color: #5a8cff; background: rgba(90,140,255,.08); }
+.partition-chip-3 { color: #ff9e18; background: rgba(255,158,24,.08); }
+
+.assignment-row .assignment-partition-0 { background: var(--cyan); }
+.assignment-row .assignment-partition-1 { background: var(--warning); }
+.assignment-row .assignment-partition-2 { background: #5a8cff; }
+.assignment-row .assignment-partition-3 { background: #ff9e18; }
+.assignment-row i.assignment-indicator.critical { background: #ff525b; }
+
+.lag-track.lag-partition-0 b { background: var(--cyan); }
+.lag-track.lag-partition-1 b { background: var(--warning); }
+.lag-track.lag-partition-2 b { background: #5a8cff; }
+.lag-track.lag-partition-3 b { background: #ff9e18; }
+
+.event-inline-panel {
+  min-height: 160px;
+}
+
+.consumer-row .partition-assignment-label {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.partition-assignment-panel {
+  margin-top: 0;
+  min-height: 100%;
+}
+
+@media (max-width: 1200px) {
+  .consumer-view-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .partition-assignment-panel {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .consumer-row {
+    grid-template-columns: 42px 1fr;
+    gap: 14px;
+  }
+
+  .consumer-identity,
+  .consumer-row .consumer-body,
+  .consumer-partitions,
+  .consumer-assignment,
+  .consumer-row .backpressure-box {
+    grid-column: 1 / -1;
+  }
+
+  .consumer-row .consumer-body {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .consumer-row {
+    grid-template-columns: 42px 1fr;
+    gap: 14px;
+  }
+
+  .consumer-identity,
+  .consumer-row .consumer-body,
+  .consumer-partitions,
+  .consumer-assignment,
+  .consumer-row .backpressure-box {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Keep consumer card content separated at desktop widths. */
+.consumer-view-layout {
+  grid-template-columns: minmax(0, 1.65fr) minmax(360px, .9fr);
+  gap: 20px;
+}
+
+.consumer-row {
+  grid-template-columns: 48px minmax(170px, .9fr) minmax(260px, 1.4fr) minmax(210px, 1fr);
+  grid-template-areas:
+    'badge identity metrics assignment'
+    'badge identity partitions assignment'
+    'badge backpressure backpressure assignment';
+  column-gap: 24px;
+  row-gap: 12px;
+  min-height: 180px;
+  padding: 28px 24px;
+  align-items: center;
+}
+
+.consumer-number { grid-area: badge; }
+.consumer-identity { grid-area: identity; }
+.consumer-row .consumer-body {
+  grid-area: metrics;
+  min-width: 0;
+}
+.consumer-partitions {
+  grid-area: partitions;
+  min-width: 0;
+}
+.consumer-assignment {
+  grid-area: assignment;
+  min-width: 210px;
+  align-self: start;
+}
+.consumer-row .backpressure-box {
+  grid-area: backpressure;
+  min-width: 0;
+}
+
+.consumer-row .consumer-body {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 20px;
+}
+
+.consumer-row .consumer-body > div {
+  min-width: 0;
+}
+
+.consumer-row .consumer-body strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.consumer-row .assignment-row {
+  display: grid;
+  grid-template-columns: 25px minmax(80px, 1fr) 90px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.consumer-row .assignment-row i {
+  min-width: 80px;
+}
+
+.consumer-row .assignment-row b {
+  min-width: 90px;
+  white-space: nowrap;
+}
+
+.partition-assignment-panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+@media (max-width: 1200px) and (min-width: 901px) {
+  .consumer-view-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .partition-assignment-panel {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .consumer-row {
+    grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-areas:
+      'badge identity'
+      'badge metrics'
+      'badge partitions'
+      'badge assignment'
+      'badge backpressure';
+    column-gap: 16px;
+    row-gap: 16px;
+    padding: 24px 20px;
+  }
+
+  .consumer-row .consumer-body {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .consumer-assignment {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .consumer-row .consumer-body {
+    grid-template-columns: 1fr;
+    row-gap: 12px;
+  }
+
+  .consumer-row .assignment-row {
+    grid-template-columns: 25px minmax(60px, 1fr) 84px;
+  }
+
+  .consumer-row .assignment-row i {
+    min-width: 60px;
+  }
+
+  .consumer-row .assignment-row b {
+    min-width: 84px;
+  }
+}
+
+/* Consumer and assignment table presentation refinements. */
+.partition-assignment-panel .panel-title-row {
+  align-items: flex-start;
+  padding-bottom: 4px;
+}
+
+.topic-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: .58rem;
+  letter-spacing: .1rem;
+}
+
+.topic-control .topic-tag {
+  margin-left: 0;
+  padding: 5px 10px;
+  color: var(--green);
+  letter-spacing: .08rem;
+}
+
+.partition-assignment-panel .partition-table {
+  border-collapse: separate;
+  border-spacing: 0 6px;
+}
+
+.partition-assignment-panel .partition-table th {
+  padding: 8px 10px;
+}
+
+.partition-assignment-panel .partition-table td {
+  padding: 11px 10px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  white-space: nowrap;
+}
+
+.partition-assignment-panel .partition-table tbody tr {
+  background: rgba(255,255,255,0.02);
+}
+
+.partition-assignment-panel .partition-table tbody tr td:first-child {
+  border-left: 1px solid rgba(255,255,255,0.06);
+  border-radius: 7px 0 0 7px;
+}
+
+.partition-assignment-panel .partition-table tbody tr td:last-child {
+  border-right: 1px solid rgba(255,255,255,0.06);
+  border-radius: 0 7px 7px 0;
+}
+
+.partition-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  padding: 4px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: .58rem;
+  font-weight: 700;
+}
+
+.consumer-badge {
+  display: inline-flex;
+  align-items: center;
+  min-width: 92px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: #dfeaf7;
+  font-size: .62rem;
+}
+
+/* Consumers page compact layout. Keep all theme values inherited. */
+.consumer-page .summary-row {
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.consumer-page .summary-box {
+  min-height: 86px;
+  padding: 12px 16px;
+}
+
+.consumer-page .summary-box strong {
+  margin: 4px 0;
+  font-size: 1.85rem;
+}
+
+.consumer-page .consumer-instance-list {
+  gap: 10px;
+}
+
+.consumer-page .consumer-row {
+  min-height: 148px;
+  padding: 16px 18px;
+  column-gap: 18px;
+  row-gap: 8px;
+}
+
+.consumer-page .consumer-row .consumer-body {
+  column-gap: 14px;
+}
+
+.consumer-page .consumer-row .consumer-body > div {
+  min-width: 108px;
+}
+
+.consumer-page .consumer-row .consumer-body strong {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.consumer-page .consumer-row .consumer-assignment {
+  min-width: 210px;
+}
+
+.consumer-page .consumer-row .assignment-row {
+  grid-template-columns: 25px minmax(70px, 1fr) 92px;
+  gap: 7px;
+}
+
+.consumer-page .consumer-row .assignment-row i {
+  min-width: 70px;
+}
+
+.consumer-page .consumer-row .assignment-row b {
+  min-width: 92px;
+  overflow: visible;
+  white-space: nowrap;
+}
+
+.consumer-page .partition-assignment-panel {
+  margin-top: 0;
+}
+
+.consumer-page .partition-assignment-panel .partition-table {
+  border-spacing: 0 4px;
+}
+
+.consumer-page .partition-assignment-panel .partition-table td {
+  padding: 8px 10px;
+}
+
+.consumer-page .lower-split {
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.consumer-page .consumer-lag-panel,
+.consumer-page .event-inline-panel {
+  min-height: 0;
+}
+
+.consumer-page .partition-rows {
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.consumer-page .partition-item {
+  padding: 8px 10px;
+}
+
+.consumer-page .rebalancing-panel {
+  margin-top: 14px;
+}
+
+@media (max-width: 1200px) {
+  .consumer-page .summary-row {
+    gap: 10px;
+  }
+}
+
+@media (max-width: 900px) {
+  .consumer-page .consumer-row {
+    min-height: 0;
+    padding: 16px 18px;
+  }
+
+  .consumer-page .consumer-row .consumer-body > div {
+    min-width: 0;
+  }
 }
