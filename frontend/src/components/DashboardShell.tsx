@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
+import { useAuth } from '../auth';
 
 const navItems = [
   { label: 'Overview', path: '/', icon: '◫' },
@@ -10,6 +11,8 @@ const navItems = [
 ];
 
 export default function DashboardShell({ children }: { children: ReactNode }) {
+  const { user, logout } = useAuth();
+
   return (
     <div className="app-layout">
       <aside className="sidebar">
@@ -31,6 +34,18 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
           ))}
         </nav>
 
+        {user && (
+          <div className="user-block">
+            <div className="user-info">
+              <span className="user-name">{user.name}</span>
+              <span className="user-role">{user.role}</span>
+            </div>
+            <button className="signout-btn" onClick={logout} title="Sign Out">
+              Sign Out
+            </button>
+          </div>
+        )}
+
         <div className="system-status">
           <div className="status-header">SYSTEM STATUS</div>
           <div className="status-row"><span className="dot green" /> Kafka <span className="online">ONLINE</span></div>
@@ -43,3 +58,4 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
     </div>
   );
 }
+

@@ -888,16 +888,59 @@ function ScenariosPage() {
   );
 }
 
+import { AuthProvider } from './auth';
+import ProtectedRoute from './components/ProtectedRoute';
+import LoginPage from './pages/LoginPage';
+
 function App() {
   return (
-    <Routes>
-      <Route path="/" element={<OverviewPage />} />
-      <Route path="/consumers" element={<ConsumersPage />} />
-      <Route path="/dlq" element={<DlqInspectorPage />} />
-      <Route path="/logs" element={<LiveLogsPage />} />
-      <Route path="/scenarios" element={<TestScenariosPage />} />
-    </Routes>
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <OverviewPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/consumers"
+          element={
+            <ProtectedRoute>
+              <ConsumersPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dlq"
+          element={
+            <ProtectedRoute>
+              <DlqInspectorPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/logs"
+          element={
+            <ProtectedRoute>
+              <LiveLogsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/scenarios"
+          element={
+            <ProtectedRoute>
+              <TestScenariosPage />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </AuthProvider>
   );
 }
 
 export default App;
+
