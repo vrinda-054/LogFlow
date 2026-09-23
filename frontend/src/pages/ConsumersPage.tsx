@@ -30,6 +30,22 @@ function formatClock(value: Date): string {
   });
 }
 
+function formatUpdatedAt(value: Date | null): string {
+  if (!value) {
+    return '—';
+  }
+
+  return value.toLocaleString([], {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
 const emptyLag: ConsumerLagResponse = {
   total_lag: 0,
   partitions: [],
@@ -113,6 +129,7 @@ export default function ConsumersPage() {
   const [throughput, setThroughput] = useState(emptyThroughput);
   const [consumers, setConsumers] = useState<ConsumerView[]>([]);
   const [lastUpdated, setLastUpdated] = useState('—');
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [isLive, setIsLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [consumerEvents, setConsumerEvents] = useState<ConsumerEvent[]>([]);
@@ -162,6 +179,7 @@ export default function ConsumersPage() {
       setIsLive(true);
       setError(null);
       setLastUpdated('just now');
+      setLastUpdatedAt(new Date());
     } else {
       const reasons = [
         lagResult.status === 'rejected' ? lagResult.reason : null,
@@ -277,7 +295,7 @@ export default function ConsumersPage() {
           </div>
 
           <div className="header-actions consumer-header-actions">
-            <div className="header-meta consumer-header-meta">
+            <div className="header-meta consumer-header-meta consumer-group-meta">
               <span>Consumer Group</span>
               <strong>logflow-consumer-group</strong>
             </div>
@@ -292,6 +310,11 @@ export default function ConsumersPage() {
             <div className="header-meta consumer-header-meta">
               <span>Last updated</span>
               <strong>• {lastUpdated}</strong>
+            </div>
+
+            <div className="header-meta consumer-header-meta">
+              <span>Timestamp</span>
+              <strong>{formatUpdatedAt(lastUpdatedAt)}</strong>
             </div>
           </div>
         </header>
