@@ -29,6 +29,15 @@ const initialLogs: LiveLog[] = [
 
 const services = ['API', 'PAYMENT', 'DATABASE', 'AUTH'];
 
+function formatLocalTime(date: Date) {
+  return date.toLocaleTimeString([], {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 function createMockLog(id: number): LiveLog {
   const service = services[Math.floor(Math.random() * services.length)];
   const failed = Math.random() > 0.78;
@@ -50,6 +59,7 @@ function createMockLog(id: number): LiveLog {
 
 export default function LiveLogsPage() {
   const [logs, setLogs] = useState(initialLogs);
+  const [lastUpdated, setLastUpdated] = useState(() => formatLocalTime(new Date()));
   const [live, setLive] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [levelFilter, setLevelFilter] = useState<'ALL' | LogLevel>('ALL');
@@ -64,6 +74,7 @@ export default function LiveLogsPage() {
         const nextId = Math.max(0, ...current.map((entry) => entry.id)) + 1;
         return [createMockLog(nextId), ...current].slice(0, 100);
       });
+      setLastUpdated(formatLocalTime(new Date()));
     }, 3000);
     return () => window.clearInterval(timer);
   }, [live]);
@@ -96,7 +107,7 @@ export default function LiveLogsPage() {
             <p>Real-time view of messages flowing through the LogFlow pipeline</p>
           </div>
           <div className="header-actions live-header-meta">
-            <span className="muted">Last event: 18:59:42</span>
+            <span className="muted">Last updated: {lastUpdated}</span>
             <button className={`toggle-btn ${live ? '' : 'paused'}`} onClick={() => setLive((value) => !value)}>● {live ? 'LIVE' : 'PAUSED'}</button>
           </div>
         </header>

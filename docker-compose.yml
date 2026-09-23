@@ -197,6 +197,7 @@ services:
       PYTHONPATH: /app
     volumes:
       - consumer-status:/run/logflow-status
+      - /var/run/docker.sock:/var/run/docker.sock
     command: ["python", "-m", "processing.api.main"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
@@ -240,4 +241,4 @@ services:
 volumes:
   kafka-data:
   postgres-data:
-  consumer-status:
+  consumer-status:

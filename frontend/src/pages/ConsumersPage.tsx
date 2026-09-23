@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  getConsumerEvents,
   getConsumerLag,
   getConsumerStatus,
   getThroughput,
+  type ConsumerEvent,
   type ConsumerLagResponse,
   type ConsumerStatusResponse,
   type ThroughputResponse,
@@ -18,6 +20,15 @@ type ConsumerView = {
   partitions: number[];
   backpressure?: string;
 };
+
+function formatClock(value: Date): string {
+  return value.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
 
 const emptyLag: ConsumerLagResponse = {
   total_lag: 0,
@@ -104,14 +115,18 @@ export default function ConsumersPage() {
   const [lastUpdated, setLastUpdated] = useState('—');
   const [isLive, setIsLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [consumerEvents, setConsumerEvents] = useState<ConsumerEvent[]>([]);
+  const [consumerEventsError, setConsumerEventsError] = useState<string | null>(null);
+  const [eventsLive, setEventsLive] = useState(false);
   const [selectedPartition, setSelectedPartition] = useState(0);
 
   const refresh = async () => {
-    const [lagResult, statusResult, throughputResult] =
+    const [lagResult, statusResult, throughputResult, eventsResult] =
       await Promise.allSettled([
         getConsumerLag(),
         getConsumerStatus(),
         getThroughput(5),
+        getConsumerEvents(20),
       ]);
 
     if (lagResult.status === 'fulfilled') {
@@ -124,6 +139,16 @@ export default function ConsumersPage() {
 
     if (throughputResult.status === 'fulfilled') {
       setThroughput(throughputResult.value);
+    }
+
+    if (eventsResult.status === 'fulfilled') {
+      setConsumerEvents(eventsResult.value.events ?? []);
+      setConsumerEventsError(null);
+      setEventsLive(true);
+    } else {
+      setConsumerEvents([]);
+      setConsumerEventsError('Consumer group event data unavailable.');
+      setEventsLive(false);
     }
 
     if (
@@ -228,6 +253,8 @@ export default function ConsumersPage() {
 
   const totalThroughput = throughput.summary.current_rate;
 
+  const hasConsumerEvents = consumerEvents.length > 0;
+
   const healthyPartitions = mainPartitions.filter(
     (partition) => partition.health === 'HEALTHY',
   ).length;
@@ -249,20 +276,20 @@ export default function ConsumersPage() {
             </p>
           </div>
 
-          <div className="header-actions">
-            <div className="header-meta">
+          <div className="header-actions consumer-header-actions">
+            <div className="header-meta consumer-header-meta">
               <span>Consumer Group</span>
               <strong>logflow-consumer-group</strong>
             </div>
 
-            <div className="header-meta">
+            <div className="header-meta consumer-header-meta">
               <span>Status</span>
               <strong className={isLive ? 'status-live' : ''}>
                 ● {status.rebalancing.state}
               </strong>
             </div>
 
-            <div className="header-meta">
+            <div className="header-meta consumer-header-meta">
               <span>Last updated</span>
               <strong>• {lastUpdated}</strong>
             </div>
@@ -620,18 +647,41 @@ export default function ConsumersPage() {
           <section className="panel event-inline-panel">
             <div className="panel-title-row">
               <div>
-                <h2>Consumer Group Events</h2>
-                <p>Real-time activity log</p>
+                <h2>Consumer Events</h2>
+                <p>Real-time consumer activity</p>
               </div>
 
-              <span className="status-tag info">
-                ● LIVE
-              </span>
+              {eventsLive && (
+                <span className="status-tag info">
+                  ● LIVE
+                </span>
+              )}
             </div>
 
-            <div className="event-empty">
-              No live consumer events are available from the API.
-            </div>
+            {consumerEventsError ? (
+              <div className="event-empty">
+                {consumerEventsError}
+              </div>
+            ) : hasConsumerEvents ? (
+              <ul className="event-list compact">
+                {consumerEvents.map((event) => (
+                  <li key={`${event.timestamp}-${event.component}-${event.message}`}>
+                    <span className="event-time">
+                      {formatClock(new Date(event.timestamp))}
+                    </span>
+                    <span className={`event-service ${event.severity.toLowerCase()}`}>
+                      {event.severity}
+                    </span>
+                    <span>{event.component}</span>
+                    <span>{event.message}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="event-empty">
+                No consumer group events have been recorded yet.
+              </div>
+            )}
           </section>
         </div>
 

@@ -107,6 +107,22 @@ app.add_middleware(
 
 
 _scenario_processes: dict[str, subprocess.Popen] = {}
+_scenario_states: dict[str, dict[str, object]] = {}
+_scenario_history: list[dict[str, object]] = []
+
+# In-memory consumer event history. These records are derived from detected
+# telemetry transitions in the current FastAPI process and are intentionally
+# not persisted to PostgreSQL or generated from client-side state.
+_consumer_events: list[dict[str, object]] = []
+_previous_consumer_state: dict[str, dict[str, object]] = {}
+
+_scenario_keys = {
+    "normal-load",
+    "traffic-spike",
+    "malformed",
+    "slow-consumer",
+    "worker-failure",
+}
 _producer_scenarios = {
     "normal-load": ["--rate", "10", "--duration", "120", "--scenario", "normal"],
     "traffic-spike": ["--rate", "10", "--duration", "300", "--scenario", "spike"],
@@ -117,21 +133,291 @@ _producer_scenarios = {
 }
 
 
+def _docker_run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["docker", *args],
+            cwd=PROJECT_ROOT,
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Docker scenario control is unavailable in the processing service.",
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "Docker command failed").strip()
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+def _docker_container_running(container_name: str) -> bool:
+    result = _docker_run(
+        ["inspect", "--format", "{{.State.Running}}", container_name],
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _record_consumer_event(
+    severity: str,
+    component: str,
+    message: str,
+) -> None:
+    """Persist a detected consumer state transition in memory."""
+    _consumer_events.append({
+        "timestamp": _timestamp(),
+        "severity": severity.upper(),
+        "component": component,
+        "message": message,
+    })
+    if len(_consumer_events) > 100:
+        _consumer_events[:] = _consumer_events[-100:]
+
+
+def _assignment_label(partitions: list[int]) -> str:
+    return ",".join(f"P{partition}" for partition in sorted(set(partitions))) or "None"
+
+
+def _normalize_assignments(values: object) -> list[int]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    assignments: list[int] = []
+    for value in values:
+        try:
+            assignments.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(assignments))
+
+
+def _consumer_label(consumer_id: str) -> str:
+    if consumer_id.startswith("consumer-"):
+        suffix = consumer_id.split("-", 1)[1]
+        return f"Consumer {suffix}"
+    return consumer_id
+
+
+def _handle_consumer_state_changes(
+    consumer_snapshot: dict[str, object],
+    rebalance_state: str,
+) -> None:
+    """Record transitions only when consumer telemetry materially changes."""
+    if not consumer_snapshot:
+        return
+
+    consumer_id = str(consumer_snapshot.get("consumer_id") or "consumer-group")
+    state_key = consumer_id if consumer_id.startswith("consumer-") else "consumer-group"
+    current_state = {
+        "status": consumer_snapshot.get("status"),
+        "backpressure_active": bool(consumer_snapshot.get("backpressure_active")),
+        "assigned_partitions": _normalize_assignments(consumer_snapshot.get("assigned_partitions")),
+        "heartbeat_available": bool(consumer_snapshot.get("last_heartbeat")),
+    }
+
+    previous_state = _previous_consumer_state.get(state_key)
+    if previous_state is None:
+        _previous_consumer_state[state_key] = current_state
+        return
+
+    label = _consumer_label(consumer_id)
+
+    previous_status = previous_state.get("status")
+    current_status = current_state["status"]
+    if previous_status != current_status and current_status not in (None, "UNKNOWN"):
+        _record_consumer_event(
+            "WARN",
+            consumer_id,
+            f"{label} status changed from {previous_status or 'UNKNOWN'} to {current_status}",
+        )
+
+    previous_backpressure = bool(previous_state.get("backpressure_active"))
+    current_backpressure = bool(current_state["backpressure_active"])
+    if previous_backpressure != current_backpressure:
+        if current_backpressure:
+            _record_consumer_event(
+                "WARN",
+                consumer_id,
+                f"{label} backpressure activated",
+            )
+        else:
+            _record_consumer_event(
+                "INFO",
+                consumer_id,
+                f"{label} backpressure cleared",
+            )
+
+    previous_assignments = previous_state.get("assigned_partitions", [])
+    current_assignments = current_state["assigned_partitions"]
+    if previous_assignments != current_assignments:
+        _record_consumer_event(
+            "INFO",
+            consumer_id,
+            f"{label} assignment changed: {_assignment_label(previous_assignments)} -> {_assignment_label(current_assignments)}",
+        )
+
+    previous_heartbeat = bool(previous_state.get("heartbeat_available"))
+    current_heartbeat = bool(current_state["heartbeat_available"])
+    if previous_heartbeat != current_heartbeat:
+        if current_heartbeat:
+            _record_consumer_event(
+                "INFO",
+                consumer_id,
+                f"{label} heartbeat/status updated",
+            )
+        else:
+            _record_consumer_event(
+                "WARN",
+                consumer_id,
+                f"{label} heartbeat unavailable",
+            )
+
+    _previous_consumer_state[state_key] = current_state
+
+
+def _new_scenario_state(scenario: str) -> dict[str, object]:
+    return {
+        "scenario": scenario,
+        "status": "ready",
+        "message": "Ready to run",
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+    }
+
+
+def _state_for(scenario: str) -> dict[str, object]:
+    return _scenario_states.setdefault(scenario, _new_scenario_state(scenario))
+
+
+def _finish_scenario(
+    scenario: str,
+    status: str,
+    message: str,
+    error: str | None = None,
+) -> None:
+    state = _state_for(scenario)
+    state.update({
+        "status": status,
+        "message": message,
+        "finished_at": _timestamp(),
+        "error": error,
+    })
+    if status in {"passed", "failed", "stopped"}:
+        _scenario_history.append(dict(state))
+
+
+def _refresh_producer_state(scenario: str) -> dict[str, object]:
+    process = _scenario_processes.get(scenario)
+    state = _state_for(scenario)
+    if process is None or state["status"] != "running":
+        return state
+
+    return_code = process.poll()
+    if return_code is None:
+        return state
+
+    _scenario_processes.pop(scenario, None)
+    if return_code == 0:
+        _finish_scenario(scenario, "passed", "Scenario process completed successfully")
+    else:
+        _finish_scenario(
+            scenario,
+            "failed",
+            "Scenario process exited with an error",
+            f"Scenario process exited with code {return_code}",
+        )
+    return _state_for(scenario)
+
+
+def _start_slow_consumer() -> None:
+    replacement_name = "logflow-consumer-3-slow"
+    if _docker_container_running(replacement_name):
+        return
+
+    container = json.loads(_docker_run(["inspect", "logflow-consumer-3"]).stdout)[0]
+    config = container["Config"]
+    host_config = container["HostConfig"]
+    command = [
+        "run", "-d", "--name", replacement_name,
+        "--network", host_config["NetworkMode"],
+        "-e", "BACKPRESSURE_HIGH_WATER=50",
+        "-e", "BACKPRESSURE_LOW_WATER=10",
+    ]
+    for environment in config.get("Env", []):
+        command.extend(["-e", environment])
+    for mount in container.get("Mounts", []):
+        source = mount.get("Name") or mount.get("Source")
+        if source and mount.get("Destination"):
+            command.extend(["-v", f"{source}:{mount['Destination']}"])
+    command.extend([
+        config["Image"],
+        "--consumer-id", "consumer-03",
+        "--inject-delay-ms", "2000",
+    ])
+
+    _docker_run(["stop", "logflow-consumer-3"])
+    try:
+        _docker_run(command)
+    except HTTPException:
+        _docker_run(["start", "logflow-consumer-3"], check=False)
+        raise
+
+
+def _start_worker_failure() -> None:
+    if _docker_container_running("logflow-consumer-2"):
+        _docker_run(["stop", "logflow-consumer-2"])
+
+
+def _stop_docker_scenario(scenario: str) -> None:
+    if scenario == "slow-consumer":
+        _docker_run(["rm", "-f", "logflow-consumer-3-slow"], check=False)
+        _docker_run(["start", "logflow-consumer-3"], check=False)
+    elif scenario == "worker-failure":
+        _docker_run(["start", "logflow-consumer-2"], check=False)
+
+
 @app.post("/scenarios/{scenario}", tags=["scenarios"])
 def start_scenario(scenario: str):
     """Start one of the repository's fixed producer scenario presets."""
-    if scenario not in {"normal-load", "traffic-spike", "malformed", "slow-consumer", "worker-failure"}:
+    if scenario not in _scenario_keys:
         raise HTTPException(status_code=404, detail="Unknown scenario")
 
-    if scenario in {"slow-consumer", "worker-failure"}:
-        raise HTTPException(
-            status_code=501,
-            detail="This scenario is currently documented as a Docker Compose operation and has no API mechanism.",
-        )
-
-    process = _scenario_processes.get(scenario)
-    if process is not None and process.poll() is None:
+    state = _refresh_producer_state(scenario)
+    if state["status"] == "running":
         return {"status": "running", "scenario": scenario}
+
+    state = _state_for(scenario)
+    state.update({
+        "status": "running",
+        "message": "Scenario started",
+        "started_at": _timestamp(),
+        "finished_at": None,
+        "error": None,
+    })
+
+    if scenario == "slow-consumer":
+        try:
+            _start_slow_consumer()
+        except HTTPException as exc:
+            _finish_scenario(scenario, "failed", "Unable to start slow consumer", str(exc.detail))
+            raise
+        _finish_scenario(scenario, "passed", "Slow consumer replacement started")
+        return {"status": "started", "scenario": scenario}
+
+    if scenario == "worker-failure":
+        try:
+            _start_worker_failure()
+        except HTTPException as exc:
+            _finish_scenario(scenario, "failed", "Unable to stop consumer-2", str(exc.detail))
+            raise
+        _finish_scenario(scenario, "passed", "Consumer-2 stopped; rebalancing triggered")
+        return {"status": "started", "scenario": scenario}
 
     producer_path = PROJECT_ROOT / "ingestion" / "producer.py"
     try:
@@ -144,9 +430,58 @@ def start_scenario(scenario: str):
         )
     except OSError as exc:
         logger.exception("Unable to start scenario %s", scenario)
+        _finish_scenario(scenario, "failed", "Unable to start scenario", str(exc))
         raise HTTPException(status_code=503, detail=f"Unable to start scenario: {exc}") from exc
 
     return {"status": "started", "scenario": scenario}
+
+
+@app.get("/scenarios/{scenario}/status", tags=["scenarios"])
+def get_scenario_status(scenario: str):
+    if scenario not in _scenario_keys:
+        raise HTTPException(status_code=404, detail="Unknown scenario")
+    return _refresh_producer_state(scenario)
+
+
+@app.get("/scenarios/history", tags=["scenarios"])
+def get_scenario_history():
+    return {"history": list(reversed(_scenario_history))}
+
+
+@app.post("/scenarios/{scenario}/stop", tags=["scenarios"])
+def stop_scenario(scenario: str):
+    if scenario not in _scenario_keys:
+        raise HTTPException(status_code=404, detail="Unknown scenario")
+
+    state = _refresh_producer_state(scenario)
+    if state["status"] != "running":
+        if scenario in {"slow-consumer", "worker-failure"} and state["status"] == "passed":
+            try:
+                _stop_docker_scenario(scenario)
+            except HTTPException as exc:
+                _finish_scenario(scenario, "failed", "Unable to restore Docker scenario", str(exc.detail))
+                raise
+            _finish_scenario(scenario, "stopped", "Scenario cleanup completed")
+            return _state_for(scenario)
+        return state
+
+    process = _scenario_processes.pop(scenario, None)
+    if process is not None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    elif scenario in {"slow-consumer", "worker-failure"}:
+        try:
+            _stop_docker_scenario(scenario)
+        except HTTPException as exc:
+            _finish_scenario(scenario, "failed", "Unable to restore Docker scenario", str(exc.detail))
+            raise
+
+    _finish_scenario(scenario, "stopped", "Scenario stopped and cleaned up")
+    return _state_for(scenario)
 
 
 @app.get("/health", tags=["infra"])
@@ -312,15 +647,48 @@ def _read_status_file(environment_name: str, default_name: str):
         ) from exc
 
 
+def _normalize_consumer_snapshots(raw: object) -> list[dict[str, object]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
 @app.get("/metrics/consumers", tags=["metrics"])
 def get_consumer_status():
     """Return the latest Person 2 consumer and partition telemetry snapshots."""
-    consumer = _read_status_file("CONSUMER_STATUS_FILE", "consumer-status.json")
     partitions = _read_status_file("PARTITION_STATUS_FILE", "partition-status.json")
+    consumer = _read_status_file("CONSUMER_STATUS_FILE", "consumer-status.json")
+    tracked_consumer_ids = {"consumer-01", "consumer-02", "consumer-03"}
+
     if isinstance(consumer, list):
+        consumer_snapshots = [
+            item for item in consumer
+            if isinstance(item, dict) and item.get("consumer_id") in tracked_consumer_ids
+        ]
+    elif isinstance(consumer, dict) and consumer.get("consumer_id") in tracked_consumer_ids:
+        consumer_snapshots = [consumer]
+    else:
+        consumer_snapshots = []
+
+    selected_consumer = max(
+        consumer_snapshots,
+        key=lambda item: item.get("last_heartbeat", ""),
+        default={},
+    )
+    rebalance_state = "BACKPRESSURE" if selected_consumer.get("backpressure_active") else "STABLE"
+
+    for consumer_snapshot in consumer_snapshots:
+        _handle_consumer_state_changes(
+            consumer_snapshot,
+            rebalance_state,
+        )
+
+    if isinstance(partitions, list):
         active_assignments = {
             (item.get("consumer_id"), partition)
-            for item in consumer
+            for item in consumer_snapshots
             for partition in item.get("assigned_partitions", [])
         }
         partitions = [
@@ -328,18 +696,27 @@ def get_consumer_status():
             for item in partitions
             if (item.get("assigned_consumer"), item.get("partition")) in active_assignments
         ]
-        consumer = max(consumer, key=lambda item: item.get("last_heartbeat", ""))
+
     if isinstance(partitions, dict):
         partitions = list(partitions.values())
+
     return {
-        "consumer": consumer,
+        "consumer": selected_consumer,
         "partitions": partitions,
         "rebalancing": {
-            "state": "BACKPRESSURE" if consumer.get("backpressure_active") else "STABLE",
-            "current_assignment": consumer.get("assigned_partitions", []),
+            "state": rebalance_state,
+            "current_assignment": selected_consumer.get("assigned_partitions", []),
             "after_recovery": "AUTOMATIC_REBALANCE",
         },
     }
+
+
+@app.get("/consumers/events", tags=["metrics"])
+def get_consumer_events(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Return the newest in-memory consumer telemetry events."""
+    return {"events": list(reversed(_consumer_events))[:limit]}
 
 
 @app.get("/metrics/errors", tags=["metrics"])

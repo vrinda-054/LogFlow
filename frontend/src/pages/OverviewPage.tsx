@@ -5,11 +5,13 @@ import {
   getConsumerStatus,
   getDlqMessages,
   getErrorRates,
+  getLogs,
   getThroughput,
   type ConsumerLagResponse,
   type ConsumerStatusResponse,
   type DlqResponse,
   type ErrorRateResponse,
+  type LogRecord,
   type ThroughputResponse,
 } from '../api';
 import DashboardShell from '../components/DashboardShell';
@@ -29,14 +31,6 @@ const defaultConsumerCards = [
   { id: 'C3', status: 'RUNNING', rate: '631/s', lag: '131' },
 ];
 
-const baseEvents = [
-  { ts: '18:59:42', service: 'INFO', text: 'Consumer 3 heartbeat received' },
-  { ts: '18:59:37', service: 'INFO', text: 'Consumer 2 rebalanced automatically' },
-  { ts: '18:59:39', service: 'WARN', text: 'Partition 2 lag spike detected' },
-  { ts: '18:59:45', service: 'ERROR', text: 'Consumer 1 retry queue exceeded threshold' },
-  { ts: '18:59:52', service: 'INFO', text: 'Kafka cluster state stable' },
-];
-
 export default function OverviewPage() {
   const navigate = useNavigate();
   const [metrics, setMetrics] = useState(initialBaseMetrics);
@@ -45,6 +39,8 @@ export default function OverviewPage() {
   const [errorRates, setErrorRates] = useState<ErrorRateResponse | null>(null);
   const [dlqData, setDlqData] = useState<DlqResponse | null>(null);
   const [consumerStatus, setConsumerStatus] = useState<ConsumerStatusResponse | null>(null);
+  const [recentEvents, setRecentEvents] = useState<LogRecord[]>([]);
+  const [recentEventsLive, setRecentEventsLive] = useState(false);
   const [isLive, setIsLive] = useState(false);
   const [lastUpdated, setLastUpdated] = useState('just now');
 
@@ -55,9 +51,10 @@ export default function OverviewPage() {
       getErrorRates(60),
       getDlqMessages(10),
       getConsumerStatus(),
+      getLogs(5, 0),
     ]);
 
-    const [tpRes, lagRes, errRes, dlqRes, consRes] = results;
+    const [tpRes, lagRes, errRes, dlqRes, consRes, logsRes] = results;
     let anySuccess = false;
 
     if (tpRes.status === 'fulfilled') { setThroughput(tpRes.value); anySuccess = true; }
@@ -66,8 +63,27 @@ export default function OverviewPage() {
     if (dlqRes.status === 'fulfilled') { setDlqData(dlqRes.value); anySuccess = true; }
     if (consRes.status === 'fulfilled') { setConsumerStatus(consRes.value); anySuccess = true; }
 
+    if (logsRes.status === 'fulfilled') {
+      const logs = logsRes.value.logs ?? [];
+      setRecentEvents(logs.slice(0, 5));
+      setRecentEventsLive(logs.length > 0);
+      if (logs.length > 0) {
+        anySuccess = true;
+      }
+    } else {
+      setRecentEvents([]);
+      setRecentEventsLive(false);
+    }
+
     setIsLive(anySuccess);
-    setLastUpdated('just now');
+    if (anySuccess) {
+      setLastUpdated(new Date().toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }));
+    }
   };
 
   useEffect(() => {
@@ -101,6 +117,20 @@ export default function OverviewPage() {
       lag: (consumerStatus.partitions.filter(p => p.assigned_consumer.includes('3') || p.assigned_consumer.includes('C3')).reduce((a, c) => a + c.current_lag, 0) || 131).toLocaleString(),
     },
   ] : defaultConsumerCards;
+
+  const formatLogTime = (value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '--:--:--';
+    }
+
+    return date.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  };
 
   return (
     <DashboardShell>
@@ -182,12 +212,24 @@ export default function OverviewPage() {
           </section>
 
           <section className="panel recent-panel">
-            <div className="panel-title-row"><span>RECENT EVENTS</span><span className="status-tag info">LIVE</span></div>
-            <ul className="event-list">
-              {baseEvents.map((row) => (
-                <li key={`${row.ts}-${row.text}`}><span className="event-time">{row.ts}</span><span className={`event-service ${row.service.toLowerCase()}`}>{row.service}</span><span>{row.text}</span></li>
-              ))}
-            </ul>
+            <div className="panel-title-row">
+              <span>RECENT EVENTS</span>
+              <span className={recentEventsLive ? 'status-tag info' : 'status-tag'}>{recentEventsLive ? 'LIVE' : 'UNAVAILABLE'}</span>
+            </div>
+            {recentEvents.length > 0 ? (
+              <ul className="event-list">
+                {recentEvents.map((row, index) => (
+                  <li key={`${row.id ?? row.timestamp}-${index}`}>
+                    <span className="event-time">{formatLogTime(row.timestamp)}</span>
+                    <span className={`event-service ${row.severity.toLowerCase()}`}>{row.severity}</span>
+                    <span>{row.service}</span>
+                    <span>{row.message}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="empty-state">Recent event data unavailable</div>
+            )}
           </section>
         </div>
 

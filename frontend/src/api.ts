@@ -34,6 +34,17 @@ export type DlqResponse = {
   messages: DlqRecord[];
 };
 
+export type ConsumerEvent = {
+  timestamp: string;
+  severity: 'INFO' | 'WARN' | 'ERROR';
+  component: string;
+  message: string;
+};
+
+export type ConsumerEventsResponse = {
+  events: ConsumerEvent[];
+};
+
 export type ConsumerStatus = {
   consumer_id: string;
   status: string;
@@ -171,8 +182,35 @@ export type ScenarioStartResponse = {
   scenario: ScenarioKey;
 };
 
+export type ScenarioStatus = 'ready' | 'running' | 'passed' | 'failed' | 'stopped';
+
+export type ScenarioStatusResponse = {
+  scenario: ScenarioKey;
+  status: ScenarioStatus;
+  message: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+};
+
+export type ScenarioHistoryResponse = {
+  history: ScenarioStatusResponse[];
+};
+
 export function startScenario(scenario: ScenarioKey): Promise<ScenarioStartResponse> {
   return apiPost<ScenarioStartResponse>(`/scenarios/${scenario}`);
+}
+
+export function getScenarioStatus(scenario: ScenarioKey): Promise<ScenarioStatusResponse> {
+  return apiFetch<ScenarioStatusResponse>(`/scenarios/${scenario}/status`);
+}
+
+export function stopScenario(scenario: ScenarioKey): Promise<ScenarioStatusResponse> {
+  return apiPost<ScenarioStatusResponse>(`/scenarios/${scenario}/stop`);
+}
+
+export function getScenarioHistory(): Promise<ScenarioHistoryResponse> {
+  return apiFetch<ScenarioHistoryResponse>('/scenarios/history');
 }
 export function getLogs(limit = 50, offset = 0): Promise<LogsResponse> {
   return apiFetch<LogsResponse>('/logs', { limit, offset });
@@ -208,6 +246,10 @@ export function getDlqMessages(limit = 50, offset = 0): Promise<DlqResponse> {
 
 export function getDlqActivity(hours = 24): Promise<DlqActivityResponse> {
   return apiFetch<DlqActivityResponse>('/dlq/activity', { hours });
+}
+
+export function getConsumerEvents(limit = 20): Promise<ConsumerEventsResponse> {
+  return apiFetch<ConsumerEventsResponse>('/consumers/events', { limit });
 }
 
 export function getConsumerStatus(): Promise<ConsumerStatusResponse> {

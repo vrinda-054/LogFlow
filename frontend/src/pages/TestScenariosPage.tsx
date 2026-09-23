@@ -5,8 +5,12 @@ import {
   getDlqActivity,
   getDlqMessages,
   getHealth,
+  getScenarioHistory,
+  getScenarioStatus,
   startScenario,
+  stopScenario,
   type ScenarioKey,
+  type ScenarioStatusResponse,
   getThroughput,
   type ConsumerLagResponse,
   type ConsumerStatusResponse,
@@ -91,7 +95,7 @@ function formatFailureReason(reason: string | undefined): string {
 export default function TestScenariosPage() {
   const [data, setData] = useState(emptyData);
   const [lastUpdated, setLastUpdated] = useState('not yet');
-  const [scenarioStatus, setScenarioStatus] = useState<Record<ScenarioKey, 'READY' | 'STARTING' | 'RUNNING' | 'FAILED'>>({
+  const [scenarioStatus, setScenarioStatus] = useState<Record<ScenarioKey, 'READY' | 'STARTING' | 'RUNNING' | 'PASSED' | 'FAILED' | 'STOPPED'>>({
     'normal-load': 'READY',
     'traffic-spike': 'READY',
     malformed: 'READY',
@@ -99,6 +103,39 @@ export default function TestScenariosPage() {
     'worker-failure': 'READY',
   });
   const [scenarioError, setScenarioError] = useState<Record<string, string>>({});
+  const [scenarioHistory, setScenarioHistory] = useState<ScenarioStatusResponse[]>([]);
+
+  const refreshScenarioStatuses = async () => {
+    const statuses = await Promise.allSettled(
+      scenarioCards.map((card) => getScenarioStatus(card.key)),
+    );
+    const nextStatuses: Partial<Record<ScenarioKey, 'READY' | 'RUNNING' | 'PASSED' | 'FAILED' | 'STOPPED'>> = {};
+
+    statuses.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        nextStatuses[scenarioCards[index].key] = result.value.status.toUpperCase() as 'READY' | 'RUNNING' | 'PASSED' | 'FAILED' | 'STOPPED';
+      }
+    });
+
+    if (Object.keys(nextStatuses).length > 0) {
+      setScenarioStatus((current) => ({ ...current, ...nextStatuses }));
+    }
+
+    const history = await getScenarioHistory().catch(() => null);
+    if (history) {
+      setScenarioHistory(history.history);
+    }
+  };
+
+  useEffect(() => {
+    void refreshScenarioStatuses();
+    if (!Object.values(scenarioStatus).some((status) => status === 'RUNNING')) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => void refreshScenarioStatuses(), 3000);
+    return () => window.clearInterval(timer);
+  }, [scenarioStatus]);
 
   useEffect(() => {
     const refresh = async () => {
@@ -140,7 +177,9 @@ export default function TestScenariosPage() {
   const totalLag = data.lag?.total_lag;
   const consumerStatus = data.consumers?.consumer.status;
   const rebalanceState = data.consumers?.rebalancing.state;
-  const latestFailure = formatFailureReason(data.dlq?.messages[0]?.failure_reason);
+  const latestFailure = data.dlq?.messages[0]
+    ? formatFailureReason(data.dlq.messages[0].failure_reason)
+    : undefined;
   const dlqActivityCount = data.activity?.activity.reduce(
     (total, item) => total + item.count,
     0,
@@ -148,6 +187,9 @@ export default function TestScenariosPage() {
   const liveStatus = data.health?.status === 'ok' || data.health?.status === 'healthy'
     ? 'ONLINE'
     : data.health?.status?.toUpperCase() ?? 'NOT AVAILABLE';
+  const activeScenarioStatus = Object.values(scenarioStatus).find(
+    (status) => status === 'RUNNING' || status === 'STARTING',
+  );
 
   const refreshLiveData = async () => {
     const [throughputResult, lagResult, consumersResult, dlqResult, activityResult, healthResult] =
@@ -178,7 +220,7 @@ export default function TestScenariosPage() {
 
     try {
       await startScenario(scenario);
-      setScenarioStatus((current) => ({ ...current, [scenario]: 'RUNNING' }));
+      await refreshScenarioStatuses();
       await refreshLiveData();
     } catch (requestError) {
       setScenarioStatus((current) => ({ ...current, [scenario]: 'FAILED' }));
@@ -187,6 +229,22 @@ export default function TestScenariosPage() {
         [scenario]: requestError instanceof Error
           ? requestError.message
           : 'Failed to start scenario',
+      }));
+    }
+  };
+
+  const stopRunningScenario = async (scenario: ScenarioKey) => {
+    setScenarioError((current) => ({ ...current, [scenario]: '' }));
+    try {
+      await stopScenario(scenario);
+      await refreshScenarioStatuses();
+      await refreshLiveData();
+    } catch (requestError) {
+      setScenarioError((current) => ({
+        ...current,
+        [scenario]: requestError instanceof Error
+          ? requestError.message
+          : 'Failed to stop scenario',
       }));
     }
   };
@@ -200,8 +258,8 @@ export default function TestScenariosPage() {
         </header>
 
         <section className="scenario-toolbar scenario-status-banner">
-          <span className="status-tag info">● NO SCENARIO RUNNING</span>
-          <span>Scenario controls are ready; no execution endpoint is available.</span>
+          <span className="status-tag info">● {Object.values(scenarioStatus).some((status) => status === 'RUNNING') ? 'SCENARIO RUNNING' : 'READY'}</span>
+          <span>Fixed scenario controls are connected to the LogFlow test mechanisms.</span>
           <span className="status-tag healthy">Kafka <strong>{liveStatus}</strong></span>
           <span className="status-tag healthy">Consumers <strong>{consumerStatus ?? 'NOT AVAILABLE'}</strong></span>
           <span className="status-tag healthy">API <strong>{data.health ? 'ONLINE' : 'NOT AVAILABLE'}</strong></span>
@@ -210,10 +268,10 @@ export default function TestScenariosPage() {
         </section>
 
         <section className="panel active-scenario">
-          <div className="panel-title-row"><span>● LIVE SYSTEM OBSERVATION <span className="scenario-badge">READY</span></span></div>
+          <div className="panel-title-row"><span>● LIVE SYSTEM OBSERVATION <span className="scenario-badge">{activeScenarioStatus ?? 'READY'}</span></span></div>
           <div className="active-scenario-layout">
             <div>
-              <div className="active-meta"><span>Scenario execution: Not available</span><span>Updated: {lastUpdated}</span></div>
+              <div className="active-meta"><span>Scenario execution is tracked by the API.</span><span>Updated: {lastUpdated}</span></div>
               <div className="active-metrics">
                 {[
                   ['CURRENT RATE', throughput === undefined ? 'Not available' : `${throughput.toFixed(2)} msg/s`],
@@ -266,6 +324,14 @@ export default function TestScenariosPage() {
                         ? 'RETRY'
                         : 'READY TO RUN'}
                 </button>
+                {scenarioStatus[card.key] === 'RUNNING' && (
+                  <button
+                    className="small-btn"
+                    onClick={() => void stopRunningScenario(card.key)}
+                  >
+                    STOP
+                  </button>
+                )}
               </div>
               {scenarioError[card.key] && (
                 <small className="danger-text">{scenarioError[card.key]}</small>
@@ -274,8 +340,26 @@ export default function TestScenariosPage() {
           ))}
         </div>
 
-        <section className="panel recent-runs"><div className="panel-title-row"><span>LIVE SCENARIO DATA</span></div><p className="empty-state">No scenario execution history is exposed by the current API.</p></section>
-        <p className="scenario-footnote">Test execution results are unavailable until a scenario control endpoint is provided.</p>
+        <section className="panel recent-runs">
+          <div className="panel-title-row"><span>SCENARIO EXECUTION HISTORY</span></div>
+          {scenarioHistory.length > 0 ? (
+            <table>
+              <thead><tr><th>SCENARIO</th><th>STATUS</th><th>STARTED</th><th>FINISHED</th><th>MESSAGE</th></tr></thead>
+              <tbody>{scenarioHistory.map((run, index) => (
+                <tr key={`${run.scenario}-${run.started_at}-${index}`}>
+                  <td>{run.scenario}</td>
+                  <td>{run.status.toUpperCase()}</td>
+                  <td>{run.started_at ?? '—'}</td>
+                  <td>{run.finished_at ?? '—'}</td>
+                  <td>{run.error ?? run.message}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          ) : (
+            <p className="empty-state">No scenario executions recorded yet.</p>
+          )}
+        </section>
+        <p className="scenario-footnote">Scenario execution state and history are reported by the API.</p>
       </div>
     </DashboardShell>
   );

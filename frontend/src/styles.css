@@ -1343,4 +1343,93 @@ button { cursor: pointer; }
   .auth-card {
     padding: 24px 18px;
   }
-}
+}
+/* Consumers page compact layout. Keep all theme values inherited. */
+.consumer-page .summary-row {
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.consumer-page .summary-box {
+  min-height: 86px;
+  padding: 12px 16px;
+}
+.consumer-page .summary-box strong {
+  margin: 4px 0;
+  font-size: 1.85rem;
+}
+.consumer-page .consumer-instance-list {
+  gap: 10px;
+}
+.consumer-page .consumer-row {
+  min-height: 148px;
+  padding: 16px 18px;
+  column-gap: 18px;
+  row-gap: 8px;
+}
+.consumer-page .consumer-row .consumer-body {
+  column-gap: 14px;
+}
+.consumer-page .consumer-row .consumer-body > div {
+  min-width: 108px;
+}
+.consumer-page .consumer-row .consumer-body strong {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.consumer-page .consumer-row .consumer-assignment {
+  min-width: 210px;
+}
+.consumer-page .consumer-row .assignment-row {
+  grid-template-columns: 25px minmax(70px, 1fr) 92px;
+  gap: 7px;
+}
+.consumer-page .consumer-row .assignment-row i {
+  min-width: 70px;
+}
+.consumer-page .consumer-row .assignment-row b {
+  min-width: 92px;
+  overflow: visible;
+  white-space: nowrap;
+}
+.consumer-page .partition-assignment-panel {
+  margin-top: 0;
+}
+.consumer-page .partition-assignment-panel .partition-table {
+  border-spacing: 0 4px;
+}
+.consumer-page .partition-assignment-panel .partition-table td {
+  padding: 8px 10px;
+}
+.consumer-page .lower-split {
+  gap: 14px;
+  margin-top: 14px;
+}
+.consumer-page .consumer-lag-panel,
+.consumer-page .event-inline-panel {
+  min-height: 0;
+}
+.consumer-page .partition-rows {
+  gap: 8px;
+  margin-top: 8px;
+}
+.consumer-page .partition-item {
+  padding: 8px 10px;
+}
+.consumer-page .rebalancing-panel {
+  margin-top: 14px;
+}
+@media (max-width: 1200px) {
+  .consumer-page .summary-row {
+    gap: 10px;
+  }
+}
+@media (max-width: 900px) {
+  .consumer-page .consumer-row {
+    min-height: 0;
+    padding: 16px 18px;
+  }
+  .consumer-page .consumer-row .consumer-body > div {
+    min-width: 0;
+  }
+}
