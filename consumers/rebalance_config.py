@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 RebalanceEventName = Literal["partition_assigned", "group_stable", "partition_revoked", "reassignment"]
+MAX_PERSISTED_EVENTS = 100
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,52 @@ class RebalanceEvent:
     topic: str | None
 
 
+def _consumer_status_dir() -> Path:
+    return Path(os.environ.get("CONSUMER_STATUS_DIR", "/run/logflow-status/consumers"))
+
+
+def _persist_event(event: RebalanceEvent) -> None:
+    """Append a rebalance event to this consumer's shared status file."""
+    status_dir = _consumer_status_dir()
+    event_path = status_dir / f"{event.consumer_id}-events.json"
+    temporary_path: Path | None = None
+
+    try:
+        status_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            events = json.loads(event_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            events = []
+
+        if not isinstance(events, list):
+            events = []
+
+        events.append(asdict(event))
+        events = events[-MAX_PERSISTED_EVENTS:]
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=status_dir,
+            prefix=f".{event.consumer_id}-events-",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            json.dump(events, temporary_file)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+            temporary_path = Path(temporary_file.name)
+
+        temporary_path.replace(event_path)
+    except Exception as exc:
+        logger.warning("failed to persist rebalance event %s: %s", event.consumer_id, exc)
+        if temporary_path:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+
+
 def _emit(
     consumer: Any, event_name: RebalanceEventName, partition: Any = None, consumer_id: str | None = None
 ) -> RebalanceEvent:
@@ -35,6 +84,7 @@ def _emit(
         getattr(partition, "topic", None),
     )
     logger.info("event=%s", json.dumps(asdict(event), sort_keys=True))
+    _persist_event(event)
     return event
 
 

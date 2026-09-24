@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   getConsumerEvents,
   getConsumerLag,
   getConsumerStatus,
   getThroughput,
   type ConsumerEvent,
+  type RebalanceEvent,
   type ConsumerLagResponse,
+  type PartitionStatus,
   type ConsumerStatusResponse,
   type ThroughputResponse,
 } from '../api';
@@ -124,8 +127,11 @@ function toConsumers(
 }
 
 export default function ConsumersPage() {
+  const navigate = useNavigate();
   const [lagData, setLagData] = useState(emptyLag);
   const [status, setStatus] = useState(emptyStatus);
+  const previousStatusRef = useRef(emptyStatus);
+  const [rebalanceBefore, setRebalanceBefore] = useState<PartitionStatus[]>([]);
   const [throughput, setThroughput] = useState(emptyThroughput);
   const [consumers, setConsumers] = useState<ConsumerView[]>([]);
   const [lastUpdated, setLastUpdated] = useState('—');
@@ -133,6 +139,7 @@ export default function ConsumersPage() {
   const [isLive, setIsLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [consumerEvents, setConsumerEvents] = useState<ConsumerEvent[]>([]);
+  const [rebalanceEvents, setRebalanceEvents] = useState<RebalanceEvent[]>([]);
   const [consumerEventsError, setConsumerEventsError] = useState<string | null>(null);
   const [eventsLive, setEventsLive] = useState(false);
   const [selectedPartition, setSelectedPartition] = useState(0);
@@ -151,6 +158,29 @@ export default function ConsumersPage() {
     }
 
     if (statusResult.status === 'fulfilled') {
+      const nextPartitions = statusResult.value.partitions.filter(
+        (partition) =>
+          partition.assigned_consumer !== 'dlq-fast' &&
+          partition.assigned_consumer !== 'dlq-test',
+      );
+      const currentPartitions = previousStatusRef.current.partitions.filter(
+        (partition) =>
+          partition.assigned_consumer !== 'dlq-fast' &&
+          partition.assigned_consumer !== 'dlq-test',
+      );
+      const assignmentsChanged = currentPartitions.some((partition) => {
+        const next = nextPartitions.find(
+          (candidate) => candidate.partition === partition.partition,
+        );
+        return next?.assigned_consumer !== partition.assigned_consumer;
+      });
+
+      if (assignmentsChanged) {
+        setRebalanceBefore((previous) =>
+          previous.length > 0 ? previous : currentPartitions,
+        );
+      }
+      previousStatusRef.current = statusResult.value;
       setStatus(statusResult.value);
     }
 
@@ -160,10 +190,12 @@ export default function ConsumersPage() {
 
     if (eventsResult.status === 'fulfilled') {
       setConsumerEvents(eventsResult.value.events ?? []);
+      setRebalanceEvents(eventsResult.value.rebalance_events ?? []);
       setConsumerEventsError(null);
       setEventsLive(true);
     } else {
       setConsumerEvents([]);
+      setRebalanceEvents([]);
       setConsumerEventsError('Consumer group event data unavailable.');
       setEventsLive(false);
     }
@@ -272,6 +304,34 @@ export default function ConsumersPage() {
   const totalThroughput = throughput.summary.current_rate;
 
   const hasConsumerEvents = consumerEvents.length > 0;
+
+  const currentAssignments = useMemo(
+    () =>
+      status.partitions.filter(
+        (partition) =>
+          partition.assigned_consumer !== 'dlq-fast' &&
+          partition.assigned_consumer !== 'dlq-test',
+      ),
+    [status.partitions],
+  );
+
+  const movedPartitions = useMemo(() => {
+    if (rebalanceBefore.length === 0) return new Set<number>();
+
+    return new Set(
+      currentAssignments
+        .filter((partition) => {
+          const before = rebalanceBefore.find(
+            (candidate) => candidate.partition === partition.partition,
+          );
+          return before && before.assigned_consumer !== partition.assigned_consumer;
+        })
+        .map((partition) => partition.partition),
+    );
+  }, [currentAssignments, rebalanceBefore]);
+
+  const lifecycleState = status.rebalancing.state.toUpperCase();
+  const hasRecovered = rebalanceBefore.length > 0 && lifecycleState === 'STABLE';
 
   const healthyPartitions = mainPartitions.filter(
     (partition) => partition.health === 'HEALTHY',
@@ -718,40 +778,105 @@ export default function ConsumersPage() {
               </p>
             </div>
 
-            <button className="scenario-button">
+            <button
+              className="scenario-button"
+              onClick={() => navigate('/scenarios')}
+            >
               SCENARIO VIEW
             </button>
           </div>
 
           <div className="rebalance-body">
-            <div className="rebalance-card">
-              <h3>
-                Consumer Group
+            <div className="rebalance-card rebalance-lifecycle-card">
+              <div className="rebalance-card-heading">
+                <h3>Rebalance lifecycle</h3>
+                <span className="status-tag info">● {lifecycleState}</span>
+              </div>
 
-                <span
-                  className={
-                    status.rebalancing.state === 'STABLE'
-                      ? 'success-tag'
-                      : 'warning-tag'
-                  }
-                >
-                  {status.rebalancing.state}
-                </span>
-              </h3>
+              <div className="rebalance-lifecycle">
+                <div className={lifecycleState === 'STABLE' && !hasRecovered ? 'is-current' : 'is-complete'}>
+                  <b>STABLE</b>
+                  <span>Group operating normally</span>
+                </div>
+                <div className={lifecycleState === 'REBALANCING' ? 'is-current' : lifecycleState === 'STABLE' && hasRecovered ? 'is-complete' : ''}>
+                  <b>REBALANCING</b>
+                  <span>Assignments are being coordinated</span>
+                </div>
+                <div className={hasRecovered ? 'is-current' : ''}>
+                  <b>RECOVERED / STABLE</b>
+                  <span>Processing resumed after reassignment</span>
+                </div>
+              </div>
 
-              <strong>
-                Current assignment:{' '}
-                {status.rebalancing.current_assignment.length > 0
-                  ? status.rebalancing.current_assignment
-                      .map((p) => `P${p}`)
-                      .join(', ')
-                  : 'None'}
-              </strong>
+              <div className="rebalance-current-state">
+                <span>Current assignment</span>
+                <strong>
+                  {status.rebalancing.current_assignment.length > 0
+                    ? status.rebalancing.current_assignment.map((p) => `P${p}`).join(', ')
+                    : 'None'}
+                </strong>
+              </div>
+            </div>
 
-              <p>
-                After recovery:{' '}
-                {status.rebalancing.after_recovery}
-              </p>
+            <div className="rebalance-card rebalance-assignment-card">
+              <div className="rebalance-card-heading">
+                <h3>Partition reassignment</h3>
+                <span className="lag-legend">{movedPartitions.size} moved</span>
+              </div>
+              <div className="rebalance-assignment-grid">
+                <div>
+                  <span className="rebalance-label">Before</span>
+                  {rebalanceBefore.length > 0 ? rebalanceBefore.map((partition) => (
+                    <div className="rebalance-assignment-row" key={`before-${partition.partition}`}>
+                      <span>P{partition.partition}</span>
+                      <strong>{partition.assigned_consumer}</strong>
+                    </div>
+                  )) : <p className="rebalance-unavailable">No prior assignment captured.</p>}
+                </div>
+                <div>
+                  <span className="rebalance-label">After</span>
+                  {currentAssignments.length > 0 ? currentAssignments.map((partition) => (
+                    <div className={`rebalance-assignment-row ${movedPartitions.has(partition.partition) ? 'is-moved' : ''}`} key={`after-${partition.partition}`}>
+                      <span>P{partition.partition}</span>
+                      <strong>{partition.assigned_consumer}</strong>
+                    </div>
+                  )) : <p className="rebalance-unavailable">No current assignment available.</p>}
+                </div>
+              </div>
+            </div>
+
+            <div className="rebalance-card rebalance-health-card">
+              <div className="rebalance-card-heading">
+                <h3>Consumer health</h3>
+                <span className="lag-legend">Current API state</span>
+              </div>
+              {consumers.length > 0 ? (
+                <div className="rebalance-consumer-list">
+                  {consumers.map((consumer) => (
+                    <div className="rebalance-consumer-row" key={consumer.id}>
+                      <strong>{consumer.id}</strong>
+                      <span className={consumer.status === 'RUNNING' ? 'healthy-text' : 'orange-text'}>{consumer.status}</span>
+                      <span>{consumer.rate.toFixed(2)} msg/s · Lag {consumer.lag.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="rebalance-unavailable">No consumer health data is available.</p>
+              )}
+            </div>
+
+            <div className="rebalance-card rebalance-result-card">
+              <div className="rebalance-card-heading">
+                <h3>Recovery result</h3>
+                <span className={isLive ? 'healthy-text' : 'orange-text'}>{isLive ? 'LIVE' : 'UNAVAILABLE'}</span>
+              </div>
+              <div className="rebalance-result-grid">
+                <div><span>Rebalance duration</span><strong>Not available</strong></div>
+                <div><span>Partitions reassigned</span><strong>{rebalanceBefore.length > 0 ? movedPartitions.size : 'Not available'}</strong></div>
+                <div><span>Consumers available</span><strong>{consumers.length > 0 ? `${activeConsumers} / ${totalConsumers}` : 'Not available'}</strong></div>
+                <div><span>Group state</span><strong>{lifecycleState || 'Not available'}</strong></div>
+                <div><span>Processing resumed</span><strong>{isLive ? 'YES' : 'NO'}</strong></div>
+              </div>
             </div>
           </div>
         </section>

@@ -115,6 +115,7 @@ _scenario_history: list[dict[str, object]] = []
 # not persisted to PostgreSQL or generated from client-side state.
 _consumer_events: list[dict[str, object]] = []
 _previous_consumer_state: dict[str, dict[str, object]] = {}
+CONSUMER_EVENTS_DIR = Path("/run/logflow-status/consumers")
 
 _scenario_keys = {
     "normal-load",
@@ -715,8 +716,38 @@ def get_consumer_status():
 def get_consumer_events(
     limit: int = Query(default=20, ge=1, le=100),
 ):
-    """Return the newest in-memory consumer telemetry events."""
-    return {"events": list(reversed(_consumer_events))[:limit]}
+    """Return general consumer telemetry and persisted Kafka rebalance events."""
+    persisted_events: list[dict[str, object]] = []
+
+    if CONSUMER_EVENTS_DIR.is_dir():
+        for event_path in sorted(CONSUMER_EVENTS_DIR.glob("consumer-*-events.json")):
+            try:
+                events = json.loads(event_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Ignoring invalid consumer event file %s: %s", event_path, exc)
+                continue
+
+            if not isinstance(events, list):
+                logger.warning("Ignoring consumer event file %s: expected a JSON list", event_path)
+                continue
+
+            persisted_events.extend(
+                event for event in events if isinstance(event, dict)
+            )
+
+    persisted_events.sort(
+        key=lambda event: str(event.get("timestamp", "")),
+        reverse=True,
+    )
+    consumer_events = sorted(
+        _consumer_events,
+        key=lambda event: str(event.get("timestamp", "")),
+        reverse=True,
+    )
+    return {
+        "events": consumer_events[:limit],
+        "rebalance_events": persisted_events[:limit],
+    }
 
 
 @app.get("/metrics/errors", tags=["metrics"])

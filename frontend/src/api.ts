@@ -41,8 +41,17 @@ export type ConsumerEvent = {
   message: string;
 };
 
+export type RebalanceEvent = {
+  timestamp: string;
+  consumer_id: string;
+  event: 'partition_assigned' | 'group_stable' | 'partition_revoked' | 'reassignment';
+  partition: number | null;
+  topic: string | null;
+};
+
 export type ConsumerEventsResponse = {
   events: ConsumerEvent[];
+  rebalance_events: RebalanceEvent[];
 };
 
 export type ConsumerStatus = {
