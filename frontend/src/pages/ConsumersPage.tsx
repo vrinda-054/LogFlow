@@ -49,6 +49,18 @@ function formatUpdatedAt(value: Date | null): string {
   });
 }
 
+function formatRebalanceDuration(duration: number | null): string {
+  if (duration === null) {
+    return 'Not available';
+  }
+
+  if (duration < 1000) {
+    return `${duration} ms`;
+  }
+
+  return `${(duration / 1000).toFixed(duration >= 10000 ? 0 : 1)} s`;
+}
+
 const emptyLag: ConsumerLagResponse = {
   total_lag: 0,
   partitions: [],
@@ -331,6 +343,51 @@ export default function ConsumersPage() {
   }, [currentAssignments, rebalanceBefore]);
 
   const lifecycleState = status.rebalancing.state.toUpperCase();
+  const rebalanceMetrics = useMemo(() => {
+    const chronologicalEvents = [...rebalanceEvents].sort(
+      (first, second) =>
+        new Date(first.timestamp).getTime() -
+        new Date(second.timestamp).getTime(),
+    );
+    const rebalanceStart = chronologicalEvents.find(
+      (event) => event.event === 'partition_revoked',
+    );
+
+    if (!rebalanceStart) {
+      return {
+        hasRebalance: false,
+        duration: null,
+        partitionsReassigned: null,
+        processingResumed: false,
+      };
+    }
+
+    const rebalanceStartTime = new Date(rebalanceStart.timestamp).getTime();
+    const recoveryEvent = chronologicalEvents.find(
+      (event) =>
+        event.event === 'group_stable' &&
+        new Date(event.timestamp).getTime() > rebalanceStartTime,
+    );
+    const reassignedPartitions = new Set(
+      chronologicalEvents
+        .filter(
+          (event) =>
+            event.event === 'reassignment' &&
+            new Date(event.timestamp).getTime() > rebalanceStartTime &&
+            event.partition !== null,
+        )
+        .map((event) => event.partition),
+    );
+
+    return {
+      hasRebalance: true,
+      duration: recoveryEvent
+        ? new Date(recoveryEvent.timestamp).getTime() - rebalanceStartTime
+        : null,
+      partitionsReassigned: reassignedPartitions.size,
+      processingResumed: Boolean(recoveryEvent),
+    };
+  }, [rebalanceEvents]);
   const hasRecovered = rebalanceBefore.length > 0 && lifecycleState === 'STABLE';
 
   const healthyPartitions = mainPartitions.filter(
@@ -871,11 +928,11 @@ export default function ConsumersPage() {
                 <span className={isLive ? 'healthy-text' : 'orange-text'}>{isLive ? 'LIVE' : 'UNAVAILABLE'}</span>
               </div>
               <div className="rebalance-result-grid">
-                <div><span>Rebalance duration</span><strong>Not available</strong></div>
-                <div><span>Partitions reassigned</span><strong>{rebalanceBefore.length > 0 ? movedPartitions.size : 'Not available'}</strong></div>
+                <div><span>Rebalance duration</span><strong>{formatRebalanceDuration(rebalanceMetrics.duration)}</strong></div>
+                <div><span>Partitions reassigned</span><strong>{rebalanceMetrics.hasRebalance ? rebalanceMetrics.partitionsReassigned : 'Not available'}</strong></div>
                 <div><span>Consumers available</span><strong>{consumers.length > 0 ? `${activeConsumers} / ${totalConsumers}` : 'Not available'}</strong></div>
                 <div><span>Group state</span><strong>{lifecycleState || 'Not available'}</strong></div>
-                <div><span>Processing resumed</span><strong>{isLive ? 'YES' : 'NO'}</strong></div>
+                <div><span>Processing resumed</span><strong>{rebalanceMetrics.hasRebalance ? (rebalanceMetrics.processingResumed ? 'YES' : 'NO') : 'Not available'}</strong></div>
               </div>
             </div>
           </div>

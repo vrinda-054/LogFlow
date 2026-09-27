@@ -125,10 +125,10 @@ _scenario_keys = {
     "worker-failure",
 }
 _producer_scenarios = {
-    "normal-load": ["--rate", "10", "--duration", "120", "--scenario", "normal"],
-    "traffic-spike": ["--rate", "10", "--duration", "300", "--scenario", "spike"],
+    "normal-load": ["--rate", "10", "--duration", "30", "--scenario", "normal"],
+    "traffic-spike": ["--rate", "10", "--duration", "30", "--scenario", "spike"],
     "malformed": [
-        "--rate", "10", "--duration", "120", "--malformed-pct", "30",
+        "--rate", "10", "--duration", "30", "--malformed-pct", "30",
         "--scenario", "malformed",
     ],
 }

@@ -134,6 +134,19 @@ function LegacyOverviewPage() {
   const [errorRates, setErrorRates] = useState<Awaited<ReturnType<typeof getErrorRates>> | null>(null);
   const [dlq, setDlq] = useState<Awaited<ReturnType<typeof getDlqMessages>> | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const overviewLagPartitions = consumerStatus?.partitions ?? [];
+  const overviewMaxLag = useMemo(
+    () =>
+      Math.max(
+        0,
+        ...overviewLagPartitions.map((partition) =>
+          typeof partition.current_lag === 'number' && Number.isFinite(partition.current_lag)
+            ? Math.max(0, partition.current_lag)
+            : 0,
+        ),
+      ),
+    [overviewLagPartitions],
+  );
   const refreshOverview = async () => {
     try {
       const [healthData, consumerData, throughputData, lagData, errorData, dlqData] =
@@ -245,19 +258,26 @@ useEffect(() => {
               <span className="status-tag">Status unavailable</span>
             </div>
             <div className="bars-stack">
-              {consumerStatus?.partitions.map((partition) => (
-                <div className="bar-row" key={partition.partition}>
-                  <span>P{partition.partition}</span>
-                  <div className="bar">
-                    <i
-                    style={{
-                      width: `${Math.min(100, partition.current_lag)}%`,
-                    }}
-                    />
+              {overviewLagPartitions.map((partition) => {
+                const currentLag =
+                  typeof partition.current_lag === 'number' && Number.isFinite(partition.current_lag)
+                    ? Math.max(0, partition.current_lag)
+                    : 0;
+                const barWidth =
+                  overviewMaxLag > 0
+                    ? Math.min(100, (currentLag / overviewMaxLag) * 100)
+                    : 0;
+
+                return (
+                  <div className="bar-row" key={partition.partition}>
+                    <span>P{partition.partition}</span>
+                    <div className="bar">
+                      <i style={{ width: `${barWidth}%` }} />
+                    </div>
+                    <span>{partition.current_lag}</span>
                   </div>
-                  <span>{partition.current_lag}</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   getConsumerLag,
@@ -94,8 +94,61 @@ export default function OverviewPage() {
 
   const currentThroughput = throughput?.summary.current_rate ?? 2184;
   const currentTotalLag = lagData?.total_lag ?? 342;
-  const currentErrorRate = errorRates?.summary.overall_error_rate_pct ?? 0.42;
+  const currentErrorRate = errorRates
+    ? errorRates.summary.total_messages > 0
+      ? (errorRates.summary.total_errors / errorRates.summary.total_messages) * 100
+      : 0
+    : null;
   const currentDlqCount = dlqData?.total ?? 127;
+  const lagPartitions = lagData?.partitions ?? [];
+  const lagValues = lagPartitions
+    .map((partition) => Number(partition.lag))
+    .filter((lag): lag is number => Number.isFinite(lag));
+  const maxLag = Math.max(
+    0,
+    ...lagValues.map((lag) => Math.max(0, lag)),
+  );
+  const errorRateCategories = useMemo(() => {
+    const services = [
+      { name: 'API', service: 'api-gateway', color: '#bfff5a' },
+      { name: 'Payment', service: 'payment-service', color: '#70d3ff' },
+      { name: 'Auth', service: 'auth-service', color: '#ffb74d' },
+      { name: 'Database', service: 'db-proxy', color: '#ff4d5d' },
+    ];
+
+    const categories = services.map((service) => {
+      const serviceData = errorRates?.summary.per_service.find(
+        (item) => item.service === service.service,
+      );
+      const errors = serviceData?.error_messages ?? 0;
+      return {
+        ...service,
+        value: Number.isFinite(errors) ? Math.max(0, errors) : 0,
+      };
+    });
+    const totalErrors = categories.reduce((total, category) => total + category.value, 0);
+    let cumulative = 0;
+
+    return categories.map((category) => {
+      const start = totalErrors > 0 ? (cumulative / totalErrors) * 100 : 0;
+      cumulative += category.value;
+      const end = totalErrors > 0 ? (cumulative / totalErrors) * 100 : 0;
+      return {
+        ...category,
+        percentage: totalErrors > 0 ? (category.value / totalErrors) * 100 : 0,
+        start,
+        end,
+      };
+    });
+  }, [errorRates]);
+
+  const errorRateDonutBackground = errorRateCategories.some(
+    (category) => category.value > 0,
+  )
+    ? `conic-gradient(${errorRateCategories
+        .map((category) => `${category.color} ${category.start}% ${category.end}%`)
+        .join(', ')})`
+    : 'none';
 
   const consumerCards = consumerStatus?.partitions ? [
     {
@@ -169,27 +222,43 @@ export default function OverviewPage() {
           <section className="panel">
             <div className="panel-title-row"><span>CONSUMER LAG</span><span className="status-tag healthy">● HEALTHY</span></div>
             <div className="bars-stack">
-              {lagData?.partitions ? lagData.partitions.map((p) => (
-                <div key={p.partition_id} className="bar-row">
-                  <span>P{p.partition_id}</span>
-                  <div className="bar"><i style={{ width: `${Math.min(100, Math.max(10, p.lag / 20))}%` }} /></div>
-                  <span>{p.lag}</span>
-                </div>
-              )) : (
-                <>
-                  <div className="bar-row"><span>P1</span><div className="bar"><i style={{ width: '88%' }} /></div><span>91</span></div>
-                  <div className="bar-row"><span>P2</span><div className="bar"><i style={{ width: '75%' }} /></div><span>87</span></div>
-                  <div className="bar-row"><span>P3</span><div className="bar"><i style={{ width: '60%' }} /></div><span>124</span></div>
-                </>
-              )}
+              {lagPartitions.map((p) => {
+                const currentLag = Number(p.lag);
+                const barWidth =
+                  maxLag > 0 && Number.isFinite(currentLag)
+                    ? Math.min(100, Math.max(0, (currentLag / maxLag) * 100))
+                    : 0;
+
+                return (
+                  <div key={p.partition_id} className="bar-row">
+                    <span>P{p.partition_id}</span>
+                    <div className="bar"><i style={{ width: `${barWidth}%` }} /></div>
+                    <span>{p.lag}</span>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
           <section className="panel chart-panel">
             <div className="panel-title-row"><span>ERROR RATE</span><span className="status-tag healthy">● HEALTHY</span></div>
-            <div className="big-number small">{currentErrorRate}%</div>
+            <div className="big-number small">{currentErrorRate === null ? '--' : `${currentErrorRate.toFixed(2)}%`}</div>
             <div className="tiny-legend"><span>API</span><span>Payment</span><span>Auth</span><span>Database</span></div>
-            <div className="donut-wrap"><div className="donut" /></div>
+            <div className="donut-wrap">
+              <div className="donut" style={{ background: errorRateDonutBackground }} />
+              <div className="error-rate-legend">
+                {errorRateCategories.map((category) => (
+                  <div className="error-rate-legend-item" key={category.service}>
+                    <span
+                      className="error-rate-legend-swatch"
+                      style={{ backgroundColor: category.color }}
+                    />
+                    <span>{category.name}</span>
+                    <strong>{category.value.toLocaleString()}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
           </section>
 
           <section className="panel">
