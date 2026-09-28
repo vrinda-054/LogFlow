@@ -38,7 +38,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
           <div className="user-block">
             <div className="user-info">
               <span className="user-name">{user.name}</span>
-              <span className="user-role">{user.role}</span>
+              <span className="user-role">LogFlow Operator</span>
             </div>
             <button className="signout-btn" onClick={logout} title="Sign Out">
               Sign Out

@@ -129,6 +129,11 @@ export type HealthResponse = {
   database: string;
   error?: string;
 };
+export type AuthUser = {
+  id: number;
+  name: string;
+  email: string;
+};
 export type LogRecord = {
   id: number;
   ingested_at: string;
@@ -154,6 +159,7 @@ async function apiFetch<T>(
   });
 
   const response = await fetch(url, {
+    credentials: 'include',
     headers: { Accept: 'application/json' },
   });
 
@@ -168,6 +174,7 @@ async function apiFetch<T>(
 async function apiPost<T>(path: string): Promise<T> {
   const response = await fetch(new URL(path, API_BASE_URL), {
     method: 'POST',
+    credentials: 'include',
     headers: { Accept: 'application/json' },
   });
 
@@ -177,6 +184,38 @@ async function apiPost<T>(path: string): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+async function authRequest<T>(path: string, body?: Record<string, unknown>): Promise<T> {
+  const response = await fetch(new URL(path, API_BASE_URL), {
+    method: 'POST',
+    credentials: 'include',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail || 'The request could not be completed.');
+  }
+
+  return response.status === 204 ? (undefined as T) : response.json() as Promise<T>;
+}
+
+export function getCurrentUser(): Promise<AuthUser> {
+  return apiFetch<AuthUser>('/auth/me');
+}
+
+export function loginRequest(email: string, password: string, rememberMe: boolean): Promise<{ user: AuthUser }> {
+  return authRequest<{ user: AuthUser }>('/auth/login', { email, password, remember_me: rememberMe });
+}
+
+export function signupRequest(name: string, email: string, password: string): Promise<{ user: AuthUser }> {
+  return authRequest<{ user: AuthUser }>('/auth/signup', { name, email, password });
+}
+
+export function logoutRequest(): Promise<void> {
+  return authRequest<void>('/auth/logout');
 }
 
 export type ScenarioKey =

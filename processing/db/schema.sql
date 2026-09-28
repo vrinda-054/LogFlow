@@ -12,6 +12,7 @@
 --   metrics_error_rate    Per-service error percentage per time window.
 --   metrics_consumer_lag  Kafka consumer lag snapshot per partition.
 --   dlq_log               Dead Letter Queue events for dashboard inspection.
+--   users                 Authenticated LogFlow dashboard users.
 --
 -- Read by (FastAPI endpoints in processing/api/main.py):
 --   GET /metrics/throughput   → metrics_throughput
@@ -23,6 +24,20 @@
 -- Use a dedicated schema to isolate LogFlow tables
 CREATE SCHEMA IF NOT EXISTS logflow;
 SET search_path TO logflow;
+
+-- ---------------------------------------------------------------------------
+-- users
+-- Dashboard accounts. Passwords are stored only as Argon2id hashes.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+    id           BIGSERIAL PRIMARY KEY,
+    name         VARCHAR(120) NOT NULL,
+    email        VARCHAR(320) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active    BOOLEAN NOT NULL DEFAULT TRUE
+);
 
 -- ---------------------------------------------------------------------------
 -- processed_logs
