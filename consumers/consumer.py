@@ -217,10 +217,33 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
 
     topic = get_topic()
+    latest_lag: dict[int, int] = {}
+    draining_until: dict[int, float] = {}
+    drain_start_lag: dict[int, int] = {}
+    drain_start_processed: dict[int, int] = {}
+    drain_duration_sec = 30.0
+
+
+    def _on_assign(c: Any, partitions: list[Any]) -> None:
+        for partition in partitions:
+            latest_lag.pop(partition.partition, None)
+            draining_until.pop(partition.partition, None)
+            drain_start_lag.pop(partition.partition, None)
+            drain_start_processed.pop(partition.partition, None)
+        on_assign(c, partitions, args.consumer_id)
+
+    def _on_revoke(c: Any, partitions: list[Any]) -> None:
+        for partition in partitions:
+            latest_lag.pop(partition.partition, None)
+            draining_until.pop(partition.partition, None)
+            drain_start_lag.pop(partition.partition, None)
+            drain_start_processed.pop(partition.partition, None)
+        on_revoke(c, partitions, args.consumer_id)
+
     consumer.subscribe(
         [topic],
-        on_assign=lambda c, p: on_assign(c, p, args.consumer_id),
-        on_revoke=lambda c, p: on_revoke(c, p, args.consumer_id),
+        on_assign=_on_assign,
+        on_revoke=_on_revoke,
     )
     _log(args.consumer_id, logging.INFO, "subscription requested topic=%s", topic)
 
@@ -233,6 +256,7 @@ def main() -> None:
     paused_since: dict[int, float] = {}
     processed: deque[float] = deque()
     partition_counts: dict[int, deque[float]] = {}
+    partition_processed_counts: dict[int, int] = {}
     last_heartbeat = 0.0
     _log(args.consumer_id, logging.INFO, "consumer started")
 
@@ -252,11 +276,46 @@ def main() -> None:
                     if topic_partition is None:
                         paused.discard(partition)
                         paused_since.pop(partition, None)
+                        draining_until.pop(partition, None)
+                        drain_start_lag.pop(partition, None)
                         continue
                     lag = _partition_lag(consumer, topic_partition)
+                    latest_lag[partition] = lag
                     resume_partition(consumer, topic_partition, lag, low_water)
                     paused.discard(partition)
                     paused_since.pop(partition, None)
+                    draining_until[partition] = now + drain_duration_sec
+                    drain_start_lag[partition] = lag
+                    drain_start_processed[partition] = partition_processed_counts.get(partition, 0)
+
+            if draining_until:
+                assigned_by_partition = {tp.partition: tp for tp in consumer.assignment()}
+                for partition, deadline in list(draining_until.items()):
+                    if now < deadline:
+                        continue
+                    topic_partition = assigned_by_partition.get(partition)
+                    draining_until.pop(partition, None)
+                    if topic_partition is None:
+                        latest_lag.pop(partition, None)
+                        drain_start_lag.pop(partition, None)
+                        drain_start_processed.pop(partition, None)
+                        continue
+                    lag = _partition_lag(consumer, topic_partition)
+                    latest_lag[partition] = lag
+                    start_lag = drain_start_lag.get(partition)
+                    start_processed = drain_start_processed.get(partition, 0)
+                    current_processed = partition_processed_counts.get(partition, 0)
+                    if start_lag is not None and lag < start_lag:
+                        draining_until[partition] = now + drain_duration_sec
+                        drain_start_lag[partition] = lag
+                        drain_start_processed[partition] = current_processed
+                        continue
+                    drain_start_lag.pop(partition, None)
+                    drain_start_processed.pop(partition, None)
+                    if check_backpressure(lag, low_water, high_water) == "PAUSE":
+                        pause_partition(consumer, topic_partition, lag, high_water)
+                        paused.add(partition)
+                        paused_since[partition] = now
 
             if message is not None and message.error():
                 _log(args.consumer_id, logging.ERROR, "Kafka poll error: %s", message.error())
@@ -264,17 +323,18 @@ def main() -> None:
             elif message is not None:
                 partition = message.partition()
                 topic_partition = TopicPartition(message.topic(), message.partition(), message.offset())
-                lag = _partition_lag(consumer, topic_partition)
-                action = check_backpressure(lag, low_water, high_water)
+                lag = latest_lag.get(partition)
+                if lag is not None and partition not in draining_until:
+                    action = check_backpressure(lag, low_water, high_water)
 
-                if action == "PAUSE" and partition not in paused:
-                    pause_partition(consumer, topic_partition, lag, high_water)
-                    paused.add(partition)
-                    paused_since[partition] = now
-                elif action == "RESUME" and partition in paused:
-                    resume_partition(consumer, topic_partition, lag, low_water)
-                    paused.discard(partition)
-                    paused_since.pop(partition, None)
+                    if action == "PAUSE" and partition not in paused:
+                        pause_partition(consumer, topic_partition, lag, high_water)
+                        paused.add(partition)
+                        paused_since[partition] = now
+                    elif action == "RESUME" and partition in paused:
+                        resume_partition(consumer, topic_partition, lag, low_water)
+                        paused.discard(partition)
+                        paused_since.pop(partition, None)
 
                 raw = message.value()
                 raw_text = raw.decode("utf-8", errors="replace")
@@ -311,10 +371,18 @@ def main() -> None:
                     processed.append(now)
                     partition_times = partition_counts.setdefault(partition, deque())
                     partition_times.append(now)
+                    partition_processed_counts[partition] = (
+                        partition_processed_counts.get(partition, 0) + 1
+                    )
 
             if now - last_heartbeat >= heartbeat_interval:
                 assigned = consumer.assignment()
                 lags = [_partition_lag(consumer, tp) for tp in assigned]
+                latest_lag.clear()
+                latest_lag.update(
+                    (topic_partition.partition, partition_lag)
+                    for topic_partition, partition_lag in zip(assigned, lags)
+                )
                 while processed and processed[0] <= now - 60:
                     processed.popleft()
 
