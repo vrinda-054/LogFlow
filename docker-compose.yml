@@ -11,6 +11,12 @@ x-common-env: &common-env
   DATABASE_URL: postgresql://logflow_user:changeme@postgres:5432/logflow
   FASTAPI_PORT: "8000"
   VITE_API_BASE_URL: http://localhost:8000
+  FRONTEND_URL: http://localhost:5173
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-logflow-local-development-secret-change-me}
+  JWT_ALGORITHM: HS256
+  ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+  COOKIE_SECURE: "false"
+  COOKIE_SAMESITE: lax
   CONSUMER_STATUS_FILE: /run/logflow-status/consumer-status.json
   PARTITION_STATUS_FILE: /run/logflow-status/partition-status.json
   CONSUMER_STATUS_DIR: /run/logflow-status/consumers

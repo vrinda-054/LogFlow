@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../auth';
+import { Link } from 'react-router-dom';
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -34,8 +35,8 @@ export default function LoginPage() {
     if (!trimmedEmail) {
       setEmailError('Please enter your email.');
       isValid = false;
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail) && !/^[a-zA-Z0-9._-]+$/.test(trimmedEmail)) {
-      setEmailError('Please enter a valid email or username.');
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setEmailError('Please enter a valid email address.');
       isValid = false;
     }
 
@@ -110,11 +111,11 @@ export default function LoginPage() {
             {/* Email / Username Input */}
             <div className="form-group">
               <label htmlFor="email-input" className="form-label">
-                Email or Username <span className="required-star">*</span>
+                Email <span className="required-star">*</span>
               </label>
               <input
                 id="email-input"
-                type="text"
+                type="email"
                 className={`form-input ${emailError ? 'has-error' : ''}`}
                 value={email}
                 onChange={(e) => {
@@ -123,7 +124,7 @@ export default function LoginPage() {
                   if (authError) setAuthError('');
                 }}
                 placeholder="operator@logflow.internal"
-                autoComplete="username"
+                autoComplete="email"
                 disabled={isLoading}
                 aria-required="true"
                 aria-invalid={!!emailError}
@@ -210,6 +211,8 @@ export default function LoginPage() {
             </button>
           </form>
         </main>
+
+        <p className="auth-subtitle auth-link-row">Don't have an account? <Link to="/signup">Sign up</Link></p>
 
         {/* Footer */}
         <footer className="auth-footer">

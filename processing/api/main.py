@@ -62,14 +62,20 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import Depends, FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 try:
     from processing.db.connection import get_session, get_engine
+    from processing.auth.router import router as auth_router
+    from processing.auth.dependencies import get_current_user
+    from processing.auth.service import ensure_users_table
 except ImportError:  # pragma: no cover - fallback for direct script execution
     from db.connection import get_session, get_engine
+    from auth.router import router as auth_router
+    from auth.dependencies import get_current_user
+    from auth.service import ensure_users_table
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -89,7 +95,7 @@ app = FastAPI(
 _allowed_origins = [
     "http://localhost:5173",
     "http://localhost:5174",
-    os.environ.get("VITE_API_BASE_URL", "http://localhost:8000"),
+    *[origin.strip() for origin in os.environ.get("FRONTEND_URL", "").split(",") if origin.strip()],
 ]
 
 app.add_middleware(
@@ -99,6 +105,12 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
+
+
+@app.on_event("startup")
+def initialize_auth_schema() -> None:
+    ensure_users_table()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -383,7 +395,7 @@ def _stop_docker_scenario(scenario: str) -> None:
         _docker_run(["start", "logflow-consumer-2"], check=False)
 
 
-@app.post("/scenarios/{scenario}", tags=["scenarios"])
+@app.post("/scenarios/{scenario}", tags=["scenarios"], dependencies=[Depends(get_current_user)])
 def start_scenario(scenario: str):
     """Start one of the repository's fixed producer scenario presets."""
     if scenario not in _scenario_keys:
@@ -437,19 +449,19 @@ def start_scenario(scenario: str):
     return {"status": "started", "scenario": scenario}
 
 
-@app.get("/scenarios/{scenario}/status", tags=["scenarios"])
+@app.get("/scenarios/{scenario}/status", tags=["scenarios"], dependencies=[Depends(get_current_user)])
 def get_scenario_status(scenario: str):
     if scenario not in _scenario_keys:
         raise HTTPException(status_code=404, detail="Unknown scenario")
     return _refresh_producer_state(scenario)
 
 
-@app.get("/scenarios/history", tags=["scenarios"])
+@app.get("/scenarios/history", tags=["scenarios"], dependencies=[Depends(get_current_user)])
 def get_scenario_history():
     return {"history": list(reversed(_scenario_history))}
 
 
-@app.post("/scenarios/{scenario}/stop", tags=["scenarios"])
+@app.post("/scenarios/{scenario}/stop", tags=["scenarios"], dependencies=[Depends(get_current_user)])
 def stop_scenario(scenario: str):
     if scenario not in _scenario_keys:
         raise HTTPException(status_code=404, detail="Unknown scenario")
@@ -505,7 +517,7 @@ def health_check():
         return {"status": "degraded", "database": "unreachable", "error": str(e)}
 
 
-@app.get("/metrics/throughput", tags=["metrics"])
+@app.get("/metrics/throughput", tags=["metrics"], dependencies=[Depends(get_current_user)])
 def get_throughput(
     minutes: int = Query(
         default=60, ge=1, le=1440,
@@ -567,7 +579,7 @@ def get_throughput(
     return {"windows": windows, "summary": summary}
 
 
-@app.get("/metrics/lag", tags=["metrics"])
+@app.get("/metrics/lag", tags=["metrics"], dependencies=[Depends(get_current_user)])
 def get_consumer_lag(
     partition: int | None = Query(
         default=None,
@@ -656,7 +668,7 @@ def _normalize_consumer_snapshots(raw: object) -> list[dict[str, object]]:
     return []
 
 
-@app.get("/metrics/consumers", tags=["metrics"])
+@app.get("/metrics/consumers", tags=["metrics"], dependencies=[Depends(get_current_user)])
 def get_consumer_status():
     """Return the latest Person 2 consumer and partition telemetry snapshots."""
     partitions = _read_status_file("PARTITION_STATUS_FILE", "partition-status.json")
@@ -712,7 +724,7 @@ def get_consumer_status():
     }
 
 
-@app.get("/consumers/events", tags=["metrics"])
+@app.get("/consumers/events", tags=["metrics"], dependencies=[Depends(get_current_user)])
 def get_consumer_events(
     limit: int = Query(default=20, ge=1, le=100),
 ):
@@ -750,7 +762,7 @@ def get_consumer_events(
     }
 
 
-@app.get("/metrics/errors", tags=["metrics"])
+@app.get("/metrics/errors", tags=["metrics"], dependencies=[Depends(get_current_user)])
 def get_error_rate(
     minutes: int = Query(default=60, ge=1, le=1440),
     service: str | None = Query(default=None),
@@ -837,7 +849,7 @@ def get_error_rate(
     return {"windows": windows, "summary": summary}
 
 
-@app.get("/dlq/messages", tags=["dlq"])
+@app.get("/dlq/messages", tags=["dlq"], dependencies=[Depends(get_current_user)])
 def get_dlq_messages(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -883,7 +895,7 @@ def get_dlq_messages(
         ]
 
     return {"total": total, "messages": messages}
-@app.get("/dlq/activity", tags=["dlq"])
+@app.get("/dlq/activity", tags=["dlq"], dependencies=[Depends(get_current_user)])
 def get_dlq_activity(
     hours: int = Query(default=24, ge=1, le=168),
 ):
@@ -913,7 +925,7 @@ def get_dlq_activity(
     ]
 
     return {"activity": activity}
-@app.get("/logs", tags=["logs"])
+@app.get("/logs", tags=["logs"], dependencies=[Depends(get_current_user)])
 def get_logs(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
