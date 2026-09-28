@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import DashboardShell from '../components/DashboardShell';
+import { getLogs } from '../api';
 
 type LogLevel = 'INFO' | 'WARN' | 'ERROR';
 
@@ -25,9 +26,6 @@ type ApiLog = {
   message: string;
   trace_id: string;
 };
-
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 let storedLogs: LiveLog[] = [];
 let pollTimer: number | null = null;
@@ -76,13 +74,7 @@ function notifyListeners() {
 
 async function fetchLogs() {
   try {
-    const response = await fetch(`${API_BASE_URL}/logs?limit=100`);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = (await response.json()) as { logs?: ApiLog[] };
+    const data = await getLogs(100);
 
     if (!Array.isArray(data.logs)) {
       return;
