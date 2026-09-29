@@ -259,7 +259,17 @@ button { cursor: pointer; }
 .reason-metric strong { color: #edf4ff !important; font-size: 1.3rem !important; }
 .screenshot-filters input { max-width: 0; padding: 0; border: 0; opacity: 0; }
 .search-button { border: 1px solid var(--line); background: rgba(255,255,255,.04); border-radius: 5px; width: 43px; color: #70d3ff; font-size: 1.3rem; }
-.screenshot-filters select { min-width: 112px; border-radius: 5px; }
+.screenshot-filters .filter-select { position: relative; min-width: 112px; }
+.filter-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; min-height: 42px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 5px; background: rgba(255,255,255,.02); color: #dfeaf7; font-size: .82rem; text-align: left; transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
+.filter-select-trigger:hover, .filter-select.is-open .filter-select-trigger { border-color: rgba(170,255,103,.75); background: rgba(170,255,103,.06); }
+.filter-select-trigger:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.filter-select-chevron { color: var(--muted); font-size: 1rem; line-height: .8; transform: translateY(-2px); transition: transform .15s ease, color .15s ease; }
+.filter-select.is-open .filter-select-chevron { color: var(--green); transform: rotate(180deg) translateY(2px); }
+.filter-select-menu { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 100%; width: max-content; max-width: 240px; padding: 5px; border: 1px solid rgba(170,255,103,.42); border-radius: 6px; background: #0d1724; box-shadow: 0 12px 28px rgba(0,0,0,.42), 0 0 0 1px rgba(5,11,20,.8); }
+.filter-select-option { display: flex; align-items: center; justify-content: space-between; gap: 20px; width: 100%; padding: 9px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: .78rem; text-align: left; white-space: nowrap; }
+.filter-select-option:hover, .filter-select-option:focus-visible { outline: 0; background: rgba(170,255,103,.1); color: #edf7ff; }
+.filter-select-option.is-selected { color: var(--green); background: rgba(170,255,103,.08); }
+.filter-select-check { color: var(--green); font-size: .72rem; }
 .screenshot-dlq-content { grid-template-columns: minmax(0, 2.8fr) minmax(310px, .95fr); gap: 0; }
 .screenshot-dlq-content .large-table { margin-top: 0; border-radius: 7px 0 0 7px; }
 .screenshot-details { margin-top: 0; border-left: 0; }

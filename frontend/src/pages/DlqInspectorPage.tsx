@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { getDlqMessages, getDlqActivity, type DlqRecord, type DlqActivityRecord } from '../api';
 import DashboardShell from '../components/DashboardShell';
 
@@ -56,6 +56,73 @@ function formatFailureReason(reason: string | undefined): string {
   return readable.charAt(0).toUpperCase() + readable.slice(1);
 }
 
+type FilterOption = {
+  value: string;
+  label: string;
+};
+
+function FilterSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: FilterOption[];
+  onChange: (value: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const selectedOption = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [isOpen]);
+
+  return (
+    <div className={`filter-select${isOpen ? ' is-open' : ''}`} ref={containerRef}>
+      <button
+        type="button"
+        className="filter-select-trigger"
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
+        onClick={() => setIsOpen((open) => !open)}
+      >
+        <span>{selectedOption?.label}</span>
+        <span className="filter-select-chevron" aria-hidden="true">⌄</span>
+      </button>
+      {isOpen && (
+        <div className="filter-select-menu" role="listbox" aria-label={selectedOption?.label}>
+          {options.map((option) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={`filter-select-option${option.value === value ? ' is-selected' : ''}`}
+              key={option.value}
+              onClick={() => {
+                onChange(option.value);
+                setIsOpen(false);
+              }}
+            >
+              <span>{option.label}</span>
+              {option.value === value && <span className="filter-select-check" aria-hidden="true">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DlqInspectorPage() {
   const [messages, setMessages] = useState<ViewMessage[]>([]);
   const [activity, setActivity] = useState<DlqActivityRecord[]>([]);
@@ -63,6 +130,9 @@ export default function DlqInspectorPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [service, setService] = useState('ALL');
+  const [failureType, setFailureType] = useState('ALL');
+  const [timeRange, setTimeRange] = useState('30');
+  const [retryFilter, setRetryFilter] = useState('ALL');
   const [error, setError] = useState<string | null>(null);
   const [isLive, setIsLive] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -102,9 +172,16 @@ export default function DlqInspectorPage() {
 
   const visibleMessages = useMemo(() => messages.filter((item) => {
     const query = search.toLowerCase();
+    const ageInMinutes = (Date.now() - new Date(item.failed_at).getTime()) / 60000;
+    const matchesTime = timeRange === 'ALL' || ageInMinutes <= Number(timeRange);
+    const matchesRetries = retryFilter === 'ALL'
+      || (retryFilter === '4+' ? item.retry_count >= 4 : item.retry_count === Number(retryFilter));
     return (!query || `${item.service} ${item.failure_reason} ${item.message} ${item.trace}`.toLowerCase().includes(query))
-      && (service === 'ALL' || item.service === service);
-  }), [messages, search, service]);
+      && (service === 'ALL' || item.service === service)
+      && (failureType === 'ALL' || formatFailureReason(item.failure_reason) === failureType)
+      && matchesTime
+      && matchesRetries;
+  }), [messages, search, service, failureType, timeRange, retryFilter]);
   const selected = messages.find((item) => item.id === selectedId) ?? visibleMessages[0];
   const averageRetryCount = messages.length
     ? messages.reduce((sum, message) => sum + message.retry_count, 0) / messages.length
@@ -143,10 +220,39 @@ export default function DlqInspectorPage() {
         <div className="filter-bar screenshot-filters">
           <button className="search-button" aria-label="Search messages">⌕</button>
           <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" />
-          <select value={service} onChange={(event) => setService(event.target.value)}><option value="ALL">All Services</option>{Array.from(new Set(messages.map((item) => item.service))).map((name) => <option key={name} value={name}>{name}</option>)}</select>
-          <select defaultValue="ALL"><option>All Failure Types</option></select>
-          <select defaultValue="30"><option value="30">Last 30 Minutes</option></select>
-          <select defaultValue="ALL"><option>All Retries</option></select>
+          <FilterSelect
+            value={service}
+            onChange={setService}
+            options={[{ value: 'ALL', label: 'All Services' }, ...Array.from(new Set(messages.map((item) => item.service))).map((name) => ({ value: name, label: name }))]}
+          />
+          <FilterSelect
+            value={failureType}
+            onChange={setFailureType}
+            options={[{ value: 'ALL', label: 'All Failure Types' }, ...Array.from(new Set(messages.map((item) => formatFailureReason(item.failure_reason)))).map((reason) => ({ value: reason, label: reason }))]}
+          />
+          <FilterSelect
+            value={timeRange}
+            onChange={setTimeRange}
+            options={[
+              { value: '30', label: 'Last 30 Minutes' },
+              { value: '60', label: 'Last Hour' },
+              { value: '360', label: 'Last 6 Hours' },
+              { value: '1440', label: 'Last 24 Hours' },
+              { value: 'ALL', label: 'All Time' },
+            ]}
+          />
+          <FilterSelect
+            value={retryFilter}
+            onChange={setRetryFilter}
+            options={[
+              { value: 'ALL', label: 'All Retry Attempts' },
+              { value: '0', label: '0 Attempts' },
+              { value: '1', label: '1 Attempt' },
+              { value: '2', label: '2 Attempts' },
+              { value: '3', label: '3 Attempts' },
+              { value: '4+', label: '4+ Attempts' },
+            ]}
+          />
         </div>
 
         <div className="dlq-content screenshot-dlq-content">
